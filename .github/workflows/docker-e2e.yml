@@ -1,0 +1,95 @@
+name: NestJS API CI
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "*-[0-9]+.[0-9]+.[0-9]+*"
+      - '[0-9]+.[0-9]+.[0-9]+*'
+      - 'version-*'
+      - 'tag-*'
+      - 'staging-*'
+      - 'test2-*'
+      - 'test-*'
+      - 'Release-*'
+      - 'release-*'
+
+  pull_request:
+    branches:
+      - main
+    types: [closed]
+
+  release:
+    types:
+      - created
+
+jobs:
+  deploy:
+    runs-on: [ubuntu-latest]
+    env:
+      CI: false
+      DEPLOY_HOST: "154.26.132.87"
+      DOMAIN: "insight-care-be"
+      DEPLOY_PATH: "/var/www"
+      NODE_OPTIONS: "--max-old-space-size=4000"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Set ssh agent
+        uses: webfactory/ssh-agent@v0.5.4
+        with:
+          ssh-private-key: ${{ secrets.TECH_PRIVATE_KEY }}
+
+      - name: Parse tag
+        uses: olegtarasov/get-tag@v2.1
+        id: tagName
+        with:
+          tagRegex: "(?<package>.*)-(?<version>.*)"
+
+      - name: Setup Development env for Test site
+        if: "${{ github.event.pull_request.merged != true && steps.tagName.outputs.package == 'test' }}"
+        run: |
+          echo "DOMAIN=$TEST_DOMAIN" >> $GITHUB_ENV
+          echo "DEPLOY_HOST=$PROD_DEPLOY_HOST" >> $GITHUB_ENV
+        env:
+          TEST_DOMAIN: "insight-care-be"
+          PROD_DEPLOY_HOST: "154.26.132.87"
+
+
+
+      - name: Setup Production env for prod site
+        if: "${{ github.base_ref == 'main' && github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true }}"
+        run: |
+          echo "DOMAIN=$PROD_DOMAIN" >> $GITHUB_ENV
+          echo "DEPLOY_HOST=$PROD_DEPLOY_HOST" >> $GITHUB_ENV
+        env:
+          PROD_DOMAIN: "insight-care-be"
+          PROD_DEPLOY_HOST: "176.57.188.53"
+
+      - name: coppy code to server
+        run: |
+          rsync -e "ssh -o StrictHostKeyChecking=no" -avz --no-perms --no-owner --no-group ./ root@${DEPLOY_HOST}:${DEPLOY_PATH}/${DOMAIN}
+
+#      - name: Log in to Docker Hub
+#        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
+#        with:
+#          username: ${{ secrets.DOCKER_USERNAME }}
+#          password: ${{ secrets.DOCKER_PASSWORD }}
+#      - name: Extract metadata (tags, labels) for Docker
+#        id: meta
+#        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
+#        with:
+#          images: my-docker-hub-namespace/my-docker-hub-repository
+
+      - name: executing remote ssh commands using ssh key
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ env.DEPLOY_HOST }}
+          username: root
+          key: ${{ secrets.TECH_PRIVATE_KEY }}
+          command_timeout: 30m
+          script: |
+            cd /var/www/${{env.DOMAIN}}
+            docker compose up -d --build

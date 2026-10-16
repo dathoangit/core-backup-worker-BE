@@ -1,0 +1,33 @@
+services:
+  backup-worker:
+    build: .
+    image: core-backup-worker:latest
+    container_name: core-backup-worker
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    ports:
+      - '${HOST_PORT:-3000}:3000'
+    volumes:
+      # Long-term backup data lives on the 10.9 TB disk (/dev/sdb), never on the OS disk.
+      - /mnt/5AE4E9F5E4E9D375/backup-storage:/app/backup-storage
+      # Host timezone so local Date output matches Asia/Ho_Chi_Minh.
+      # Cron itself uses BACKUP_TIMEZONE and does not depend on this mount.
+      - /etc/localtime:/etc/localtime:ro
+    # Uncomment when MySQL or Redis runs on this same host (127.0.0.1 is the
+    # container itself; host.docker.internal reaches the host).
+    # extra_hosts:
+    #   - 'host.docker.internal:host-gateway'
+    logging:
+      driver: json-file
+      options:
+        max-size: '50m'
+        max-file: '3'
+    # Liveness only. GET /health returns 503 when backup freshness is stale and
+    # must not restart the container.
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/']
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3

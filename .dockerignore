@@ -1,0 +1,30 @@
+.git
+dist
+node_modules
+db-data
+.vuepress
+.vscode
+
+# Secrets and local env — injected at runtime via env_file
+.env
+.env.*
+jwt_*.pem
+
+# Local backup sandbox and build artifacts
+.backup-dev
+*.tsbuildinfo
+coverage
+
+# Tests and repo tooling not needed to compile
+test
+.husky
+.github
+.hygen
+.hygen.js
+.codegraph
+.cursor
+
+# Docs and OS noise
+docs
+*.md
+.DS_Store
