@@ -14,10 +14,8 @@ services:
       # Host timezone so local Date output matches Asia/Ho_Chi_Minh.
       # Cron itself uses BACKUP_TIMEZONE and does not depend on this mount.
       - /etc/localtime:/etc/localtime:ro
-    # Uncomment when MySQL or Redis runs on this same host (127.0.0.1 is the
-    # container itself; host.docker.internal reaches the host).
-    # extra_hosts:
-    #   - 'host.docker.internal:host-gateway'
+    networks:
+      - backend
     logging:
       driver: json-file
       options:
@@ -31,3 +29,8 @@ services:
       timeout: 5s
       start_period: 40s
       retries: 3
+
+networks:
+  backend:
+    external: true
+    name: backend
