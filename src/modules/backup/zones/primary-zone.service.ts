@@ -5,12 +5,18 @@ import { Injectable } from '@nestjs/common';
 
 import { BackupConfigService } from '../backup-config.service';
 import {
+  type BackupVolumeDirs,
   volumeDirForDatabase,
   volumeRoots,
-  type BackupVolumeDirs,
 } from '../backup-paths';
+import {
+  isLockHeldByPeer,
+  listHeldDatabaseLocks,
+  LOCK_OWNER_ID,
+  readLockPayload,
+} from '../engine/lock';
 import { loadState } from '../engine/state';
-import type { BackupProfile } from '../types';
+import { type BackupProfile } from '../types';
 
 export interface PrimaryZoneStatus {
   /** Meta volume (lock). */
@@ -56,10 +62,13 @@ export class PrimaryZoneService {
       fs.mkdirSync(path.join(root, 'state'), { recursive: true });
       fs.mkdirSync(path.join(root, 'snapshots'), { recursive: true });
     }
+
+    fs.mkdirSync(path.join(settings.backupDir, 'locks'), { recursive: true });
   }
 
   async getStatus(): Promise<PrimaryZoneStatus> {
     let settings;
+
     try {
       settings = await this.backupConfig.getSettings();
     } catch {
@@ -77,17 +86,21 @@ export class PrimaryZoneService {
 
     const metaDir = settings.backupDir;
     const exists = fs.existsSync(metaDir);
-    const lockPath = path.join(metaDir, 'backup.lock');
     let lockHeld = false;
     let lockPid: number | null = null;
 
-    if (fs.existsSync(lockPath)) {
-      try {
-        lockPid = Number.parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10);
-        lockHeld = Number.isFinite(lockPid);
-      } catch {
-        lockHeld = true;
-      }
+    const payload = readLockPayload(metaDir);
+
+    if (payload) {
+      lockPid = payload.pid;
+      lockHeld = isLockHeldByPeer(payload, LOCK_OWNER_ID);
+    }
+
+    const dbLocks = listHeldDatabaseLocks(metaDir, LOCK_OWNER_ID);
+
+    if (dbLocks.length > 0) {
+      lockHeld = true;
+      lockPid = dbLocks[0]?.payload.pid ?? lockPid;
     }
 
     const runIds = await this.listRunIds();
@@ -108,9 +121,7 @@ export class PrimaryZoneService {
       lockPid,
       runCount: runIds.length,
       stateDatabases,
-      freeHint: settings.backupRoot
-        ? `root=${settings.backupRoot}`
-        : null,
+      freeHint: settings.backupRoot ? `root=${settings.backupRoot}` : null,
     };
   }
 
@@ -130,6 +141,7 @@ export class PrimaryZoneService {
   async listRunIds(): Promise<string[]> {
     let volumeDirs: BackupVolumeDirs;
     let metaDir: string;
+
     try {
       const settings = await this.backupConfig.getSettings();
       volumeDirs = settings.volumeDirs;
@@ -139,6 +151,7 @@ export class PrimaryZoneService {
     }
 
     const ids = new Set<string>();
+
     for (const root of [metaDir, ...volumeRoots(volumeDirs)]) {
       for (const id of this.listRunIdsUnder(root)) {
         ids.add(id);
@@ -184,6 +197,7 @@ export class PrimaryZoneService {
 
   private listRunIdsUnder(root: string): string[] {
     const runsDir = path.join(root, 'runs');
+
     if (!fs.existsSync(runsDir)) {
       return [];
     }
@@ -199,11 +213,14 @@ export class PrimaryZoneService {
 
   private listStateDatabases(roots: string[]): string[] {
     const names = new Set<string>();
+
     for (const root of roots) {
       const stateDir = path.join(root, 'state');
+
       if (!fs.existsSync(stateDir)) {
         continue;
       }
+
       for (const f of fs.readdirSync(stateDir)) {
         if (f.endsWith('.json')) {
           names.add(f.replace(/\.json$/, ''));

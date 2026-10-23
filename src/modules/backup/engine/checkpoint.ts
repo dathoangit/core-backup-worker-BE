@@ -32,8 +32,7 @@ export function splitIdRange(
 
   while (cursor < range.toInclusive) {
     const next = cursor + chunkSize;
-    const toInclusive =
-      next < range.toInclusive ? next : range.toInclusive;
+    const toInclusive = next < range.toInclusive ? next : range.toInclusive;
     chunks.push({ fromExclusive: cursor, toInclusive });
     cursor = toInclusive;
   }
@@ -41,7 +40,9 @@ export function splitIdRange(
   return chunks;
 }
 
-export function parseWatermark(value: string | null | undefined): bigint | null {
+export function parseWatermark(
+  value: string | null | undefined,
+): bigint | null {
   if (value === null || value === undefined || value === '') {
     return null;
   }

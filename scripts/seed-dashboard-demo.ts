@@ -1,8 +1,11 @@
+/* eslint-disable no-console */
+/* eslint-disable n/no-process-exit */
+/* eslint-disable unicorn/no-process-exit */
 import dataSource from '../ormconfig';
 import { ConsciousnessLevel } from '../src/constants/consciousness-level';
 import { Gender } from '../src/constants/gender';
-import { PatientRecordDailyStatsEntity } from '../src/modules/patient-record/patient-record-daily-stats.entity';
 import { PatientRecordEntity } from '../src/modules/patient-record/patient-record.entity';
+import { PatientRecordDailyStatsEntity } from '../src/modules/patient-record/patient-record-daily-stats.entity';
 
 const DEMO_NAME_PREFIX = 'DEMO_DASHBOARD_';
 
@@ -22,10 +25,16 @@ function toVietnamYmd(date: Date): string {
   }).format(date);
 }
 
-function vietnamDayInstant(ymd: string, hour: number, minute: number, second = 0): Date {
+function vietnamDayInstant(
+  ymd: string,
+  hour: number,
+  minute: number,
+  second = 0,
+): Date {
   const hh = String(hour).padStart(2, '0');
   const mm = String(minute).padStart(2, '0');
   const ss = String(second).padStart(2, '0');
+
   return new Date(`${ymd}T${hh}:${mm}:${ss}.000+07:00`);
 }
 
@@ -36,6 +45,7 @@ function buildLatestSevenDaysSeed(): IDailySeed[] {
   const reds = [1, 2, 1, 2, 3, 2, 3];
 
   const days: IDailySeed[] = [];
+
   for (let i = 6; i >= 0; i--) {
     const d = new Date(today);
     d.setDate(today.getDate() - i);
@@ -53,15 +63,19 @@ function buildLatestSevenDaysSeed(): IDailySeed[] {
 
 function buildScores(total: number, yellow: number, red: number): number[] {
   const scores: number[] = [];
+
   for (let i = 0; i < red; i++) {
     scores.push(7);
   }
+
   for (let i = 0; i < yellow; i++) {
     scores.push(i % 2 === 0 ? 5 : 6);
   }
+
   while (scores.length < total) {
     scores.push(scores.length % 5);
   }
+
   return scores;
 }
 
@@ -137,6 +151,7 @@ async function seedDemoDashboardData(): Promise<void> {
 
   if (shouldClearOnly) {
     console.log('Dashboard demo data cleared.');
+
     return;
   }
 
@@ -146,13 +161,15 @@ async function seedDemoDashboardData(): Promise<void> {
   console.log('To remove demo records later, run this script with --clear.');
 }
 
-seedDemoDashboardData()
-  .catch((error) => {
+void (async () => {
+  try {
+    await seedDemoDashboardData();
+  } catch (error) {
     console.error('Failed to seed dashboard demo data:', error);
     process.exitCode = 1;
-  })
-  .finally(async () => {
+  } finally {
     if (dataSource.isInitialized) {
       await dataSource.destroy();
     }
-  });
+  }
+})();

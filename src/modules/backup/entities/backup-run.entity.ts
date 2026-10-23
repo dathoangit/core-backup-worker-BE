@@ -1,13 +1,11 @@
-import {
-  Column,
-  Entity,
-  Index,
-  OneToMany,
-  type Relation,
-} from 'typeorm';
+import { Column, Entity, Index, OneToMany, type Relation } from 'typeorm';
 
 import { AbstractEntity } from '../../../common/abstract.entity';
-import type { BackupMode, BackupRunStatus, BackupTrigger } from '../types';
+import {
+  type BackupMode,
+  type BackupRunStatus,
+  type BackupTrigger,
+} from '../types';
 import { BackupDatabaseRunEntity } from './backup-database-run.entity';
 
 @Entity({ name: 'backup_runs' })
@@ -37,13 +35,32 @@ export class BackupRunEntity extends AbstractEntity {
   @Column({ type: 'text', nullable: true })
   error!: string | null;
 
-  @Column({ name: 'archive_status', type: 'varchar', length: 32, nullable: true })
+  @Column({
+    name: 'archive_status',
+    type: 'varchar',
+    length: 32,
+    nullable: true,
+  })
   archiveStatus!: string | null;
 
-  @OneToMany(
-    () => BackupDatabaseRunEntity,
-    (dbRun) => dbRun.backupRun,
-    { cascade: true },
-  )
-  databases!: Relation<BackupDatabaseRunEntity>[];
+  /** CSV of source groups requested for this run (queue metadata). */
+  @Column({
+    name: 'source_groups',
+    type: 'varchar',
+    length: 128,
+    nullable: true,
+  })
+  sourceGroups!: string | null;
+
+  /** CSV of database names requested for this run (queue metadata). */
+  @Column({ name: 'databases', type: 'text', nullable: true })
+  databasesFilter!: string | null;
+
+  @Column({ name: 'queued_at', type: 'timestamp', nullable: true })
+  queuedAt!: Date | null;
+
+  @OneToMany(() => BackupDatabaseRunEntity, (dbRun) => dbRun.backupRun, {
+    cascade: true,
+  })
+  databases!: Array<Relation<BackupDatabaseRunEntity>>;
 }

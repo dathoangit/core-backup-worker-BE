@@ -1,6 +1,9 @@
 import { Injectable } from '@nestjs/common';
 
-import type { ArchiveResult, ArchiveTarget } from './archive-target.interface';
+import {
+  type ArchiveResult,
+  type ArchiveTarget,
+} from './archive-target.interface';
 
 @Injectable()
 export class NoopArchiveTarget implements ArchiveTarget {

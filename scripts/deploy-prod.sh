@@ -1,11 +1,11 @@
 #!/bin/sh
 # Deploy the backup worker on xp-cntt-server.
-# Run from core-backup-worker-BE after copying .env.production.example to .env.production.
+# Run from core-backup-worker-BE after copying .env.production.example to .env.
 set -eu
 
 STORAGE_MOUNT=/mnt/5AE4E9F5E4E9D375
 STORAGE_ROOT="$STORAGE_MOUNT/backup-storage"
-ENV_FILE=.env.production
+ENV_FILE=.env
 # uid/gid of the "node" user inside node:22-alpine.
 CONTAINER_UID=1000
 CONTAINER_GID=1000
@@ -17,7 +17,7 @@ fail() {
 
 docker compose version >/dev/null 2>&1 || fail "docker compose is not available"
 
-[ -f "$ENV_FILE" ] || fail "$ENV_FILE is missing (copy .env.production.example and fill it in)"
+[ -f "$ENV_FILE" ] || fail "$ENV_FILE is missing (copy .env.production.example to .env and fill it in)"
 
 # A missing mount would silently write terabytes of backup data onto the OS disk.
 mountpoint -q "$STORAGE_MOUNT" \

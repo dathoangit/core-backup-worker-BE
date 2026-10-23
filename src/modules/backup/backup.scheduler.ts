@@ -1,35 +1,91 @@
 import {
+  BadRequestException,
   Injectable,
   Logger,
-  OnModuleDestroy,
-  OnModuleInit,
+  type OnModuleDestroy,
+  type OnModuleInit,
 } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { CronJob } from 'cron';
 
-import { BackupConfigService } from './backup-config.service';
 import { BackupService } from './backup.service';
-import type { IncrementalCronBucket } from './incremental-schedule';
-import type { BackupRunOptions, SourceGroup } from './types';
+import { BackupConfigService } from './backup-config.service';
+import { type IncrementalCronBucket } from './incremental-schedule';
+import { BackupScheduleReloadBus } from './schedule/backup-schedule-reload.bus';
+import { type BackupRunOptions, type SourceGroup } from './types';
 
 /**
- * Cron jobs are always registered at boot. Enable/disable is gated at fire time
- * via BACKUP_SCHEDULE_ENABLED in app_settings (FE toggle) — no env/restart needed
- * to turn the schedule on or off. Cron expression / timezone changes still need a
- * process restart (or a future reload API).
+ * Cron jobs are registered at boot and hot-reloaded via ScheduleRegistry
+ * when cron/timezone settings change. Enable/disable is gated at fire time
+ * via BACKUP_SCHEDULE_ENABLED.
  */
 @Injectable()
 export class BackupScheduler implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BackupScheduler.name);
+
   private readonly jobNames: string[] = [];
+
+  private reloading = false;
 
   constructor(
     private readonly backupConfig: BackupConfigService,
     private readonly backupService: BackupService,
     private readonly schedulerRegistry: SchedulerRegistry,
+    private readonly reloadBus: BackupScheduleReloadBus,
   ) {}
 
   async onModuleInit(): Promise<void> {
+    this.reloadBus.register(async () => {
+      await this.reload();
+    });
+    await this.registerAll();
+  }
+
+  onModuleDestroy(): void {
+    this.reloadBus.unregister();
+    this.clearAllJobs();
+  }
+
+  /**
+   * Unregister all cron jobs and register again from current settings.
+   * Validates cron expressions first; on failure keeps the previous schedule.
+   */
+  async reload(): Promise<{ jobCount: number; timezone: string }> {
+    if (this.reloading) {
+      throw new BadRequestException('Schedule reload already in progress');
+    }
+
+    this.reloading = true;
+
+    try {
+      const settings = await this.backupConfig.getSettings();
+      this.assertCron(settings.hisFullCron, 'BACKUP_HIS_FULL_CRON');
+      this.assertCron(settings.emrFullCron, 'BACKUP_EMR_FULL_CRON');
+      this.assertCron(settings.lisFullCron, 'BACKUP_LIS_FULL_CRON');
+      this.assertTimezone(settings.timezone);
+
+      const databases =
+        await this.backupConfig.listConfiguredScheduleDatabases();
+      const buckets =
+        await this.backupConfig.getIncrementalCronBuckets(databases);
+
+      for (const bucket of buckets) {
+        this.assertCron(bucket.cron, 'incremental-bucket');
+      }
+
+      this.clearAllJobs();
+      await this.registerAll();
+
+      return {
+        jobCount: this.jobNames.length,
+        timezone: settings.timezone,
+      };
+    } finally {
+      this.reloading = false;
+    }
+  }
+
+  private async registerAll(): Promise<void> {
     try {
       const settings = await this.backupConfig.getSettings();
       await this.registerIncrementalJobs(settings.timezone);
@@ -55,7 +111,7 @@ export class BackupScheduler implements OnModuleInit, OnModuleDestroy {
         ['LIS'],
       );
       this.logger.log(
-        `Backup cron jobs registered (timezone=${settings.timezone}). ` +
+        `Backup cron jobs registered (count=${this.jobNames.length}, timezone=${settings.timezone}). ` +
           `Runs only when BACKUP_SCHEDULE_ENABLED is true (current=${settings.scheduleEnabled}).`,
       );
     } catch (error) {
@@ -67,7 +123,7 @@ export class BackupScheduler implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  onModuleDestroy(): void {
+  private clearAllJobs(): void {
     for (const name of this.jobNames) {
       try {
         this.schedulerRegistry.deleteCronJob(name);
@@ -75,11 +131,13 @@ export class BackupScheduler implements OnModuleInit, OnModuleDestroy {
         // already removed
       }
     }
+
+    this.jobNames.length = 0;
   }
 
   private async registerIncrementalJobs(timezone: string): Promise<void> {
-    const databases =
-      await this.backupConfig.listConfiguredScheduleDatabases();
+    const databases = await this.backupConfig.listConfiguredScheduleDatabases();
+
     if (databases.length === 0) {
       this.logger.warn(
         'No HIS/EMR/LIS databases configured; skipping incremental cron registration',
@@ -186,19 +244,38 @@ export class BackupScheduler implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    this.logger.log(`scheduled backup starting: ${label}`);
+    this.logger.log(`scheduled backup enqueue: ${label}`);
+
     try {
-      const manifest = await this.backupService.runOnceAndWait(options);
-      const failed = manifest.databases.filter((d) => d.status === 'error');
+      const result = await this.backupService.triggerRun(options);
       this.logger.log(
-        `scheduled backup finished ${manifest.runId} (${label}): ${manifest.databases.length} databases, ${failed.length} errors`,
+        `scheduled backup queued ${result.runId} (${label}) mode=${result.mode}`,
       );
     } catch (error) {
       this.logger.error(
-        `scheduled backup failed (${label}): ${
+        `scheduled backup enqueue failed (${label}): ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
+    }
+  }
+
+  private assertCron(expr: string, label: string): void {
+    try {
+      // eslint-disable-next-line no-new
+      new CronJob(expr, () => {}, null, false, 'UTC');
+    } catch {
+      throw new BadRequestException(
+        `Invalid cron expression (${label}): ${expr}`,
+      );
+    }
+  }
+
+  private assertTimezone(timezone: string): void {
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: timezone });
+    } catch {
+      throw new BadRequestException(`Invalid timezone: ${timezone}`);
     }
   }
 }

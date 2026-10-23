@@ -4,6 +4,7 @@ Canonical entry: [`../README.md`](../README.md) (agent table).
 
 | Doc | Topic |
 |-----|-------|
+| [luong-he-thong.md](./luong-he-thong.md) | Toàn bộ luồng BE: BullMQ, cron, dump, đĩa, API, CLI |
 | [auth.md](./auth.md) | JWT, session, Google, email, reset |
 | [roles.md](./roles.md) | `StaffRole`, `@Auth`, guards |
 | [admin-users.md](./admin-users.md) | `/admin/users` APIs |

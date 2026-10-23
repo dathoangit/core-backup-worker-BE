@@ -2,15 +2,18 @@
 /* eslint-disable n/no-process-exit */
 /* eslint-disable unicorn/no-process-exit */
 /**
- * Upsert allowlisted app_settings from an env file into the app database.
+ * Upsert allowlisted app_settings from an env/seed file into the app database.
+ * Secrets (*_PASSWORD) are encrypted with SETTINGS_SECRET_KEY.
  *
  * Usage (from core-backup-worker-BE):
- *   yarn settings:sync-from-env
- *   yarn settings:sync-from-env -- --env-file=.env.production --force
+ *   yarn settings:sync-from-env -- --env-file=.env.settings --all --include-paths
+ *   yarn settings:sync-from-env -- --env-file=.env.settings --all --include-paths --force
  *   yarn settings:sync-from-env -- --sources --force --dry-run
  *
- * Default: only HIS_/EMR_/LIS_/BADL_ keys (credentials + hosts).
- * --all: every allowlisted key present in the env file (still skips volume paths
+ * Prefer `.env.settings` (settings seed) over runtime `.env`.
+ * Default without --env-file: `.env.settings` if present, else `.env`.
+ * Default key filter: only HIS_/EMR_/LIS_/BADL_ keys (credentials + hosts).
+ * --all: every allowlisted key present in the file (still skips volume paths
  *        unless --include-paths).
  * --force: overwrite non-empty DB values.
  * Without --force: insert missing / fill empty only.
@@ -22,9 +25,9 @@ import path from 'node:path';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
 
+import { AppSettingEntity } from '../src/modules/settings/entities/app-setting.entity';
 import { SETTING_KEY_DEFS } from '../src/modules/settings/settings.constants';
 import { encryptSecret } from '../src/modules/settings/settings-crypto';
-import { AppSettingEntity } from '../src/modules/settings/entities/app-setting.entity';
 import { SnakeNamingStrategy } from '../src/snake-naming.strategy';
 
 const VOLUME_PATH_KEYS = new Set([
@@ -42,6 +45,7 @@ function hasFlag(name: string): boolean {
 
 function readArg(name: string): string | undefined {
   const index = process.argv.indexOf(name);
+
   if (index === -1) {
     return undefined;
   }
@@ -55,15 +59,15 @@ function isSourceKey(key: string): boolean {
 
 function resolveEnvFile(): string {
   const fromArg = readArg('--env-file');
+
   if (fromArg) {
     return path.resolve(process.cwd(), fromArg);
   }
 
-  if (process.env.NODE_ENV === 'production') {
-    const prod = path.resolve(process.cwd(), '.env.production');
-    if (fs.existsSync(prod)) {
-      return prod;
-    }
+  const seed = path.resolve(process.cwd(), '.env.settings');
+
+  if (fs.existsSync(seed)) {
+    return seed;
   }
 
   return path.resolve(process.cwd(), '.env');
@@ -71,6 +75,7 @@ function resolveEnvFile(): string {
 
 async function main(): Promise<void> {
   const envFile = resolveEnvFile();
+
   if (!fs.existsSync(envFile)) {
     throw new Error(`Env file not found: ${envFile}`);
   }
@@ -84,6 +89,7 @@ async function main(): Promise<void> {
   const sourcesOnly = !allKeys;
 
   const secretKey = process.env.SETTINGS_SECRET_KEY ?? '';
+
   if (!secretKey.trim()) {
     throw new Error(
       'SETTINGS_SECRET_KEY is required in the env file (must match the running app)',
@@ -115,7 +121,9 @@ async function main(): Promise<void> {
 
   console.log(
     `[settings:sync] file=${envFile} db=${process.env.DB_HOST}/${process.env.DB_DATABASE} ` +
-      `mode=${sourcesOnly ? 'sources' : 'all'}${includePaths ? '+paths' : ''} ` +
+      `mode=${sourcesOnly ? 'sources' : 'all'}${
+        includePaths ? '+paths' : ''
+      } ` +
       `force=${force} dryRun=${dryRun}`,
   );
 
@@ -130,6 +138,7 @@ async function main(): Promise<void> {
     }
 
     const fromEnv = process.env[def.key];
+
     if (fromEnv === undefined || fromEnv === null || fromEnv === '') {
       skipped += 1;
       continue;
@@ -140,12 +149,14 @@ async function main(): Promise<void> {
       : fromEnv;
 
     const existing = await repo.findOne({ where: { key: def.key } });
+
     if (!existing) {
       console.log(`  + insert ${def.key}${def.isSecret ? ' (secret)' : ''}`);
+
       if (!dryRun) {
         await repo.save(
           repo.create({
-            id: randomUUID() as Uuid,
+            id: randomUUID(),
             key: def.key,
             category: def.category,
             isSecret: def.isSecret,
@@ -153,6 +164,7 @@ async function main(): Promise<void> {
           }),
         );
       }
+
       inserted += 1;
       continue;
     }
@@ -161,6 +173,7 @@ async function main(): Promise<void> {
       existing.value === null ||
       existing.value === undefined ||
       existing.value === '';
+
     if (!empty && !force) {
       skipped += 1;
       continue;
@@ -171,12 +184,14 @@ async function main(): Promise<void> {
         def.isSecret ? ' (secret)' : ''
       }`,
     );
+
     if (!dryRun) {
       existing.value = storedValue;
       existing.isSecret = def.isSecret;
       existing.category = def.category;
       await repo.save(existing);
     }
+
     updated += 1;
   }
 

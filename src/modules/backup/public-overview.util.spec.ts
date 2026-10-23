@@ -25,8 +25,8 @@ describe('public-overview.util', () => {
     );
 
     expect(history).toHaveLength(14);
-    expect(history[history.length - 1]?.date).toBe('2026-03-16');
-    expect(history[history.length - 1]).toMatchObject({
+    expect(history.at(-1)?.date).toBe('2026-03-16');
+    expect(history.at(-1)).toMatchObject({
       ok: 1,
       error: 1,
       partial: 0,

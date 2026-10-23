@@ -4,19 +4,18 @@
 /* eslint-disable unicorn/no-process-exit */
 import { join } from 'node:path';
 
-import {
-  UnprocessableEntityException,
-  ValidationPipe,
-} from '@nestjs/common';
-import { type ValidationError } from 'class-validator';
+import { UnprocessableEntityException, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import {
   ExpressAdapter,
   type NestExpressApplication,
 } from '@nestjs/platform-express';
+import { type ValidationError } from 'class-validator';
+import cookieParser from 'cookie-parser';
 import { type Request, type Response } from 'express';
 
 import { AppModule } from './app.module';
+import { resolveFrontendOrigins } from './modules/auth/auth-cookie.util';
 import { setupSwagger } from './setup-swagger';
 
 export async function bootstrap(): Promise<NestExpressApplication> {
@@ -27,8 +26,18 @@ export async function bootstrap(): Promise<NestExpressApplication> {
   const app = await NestFactory.create<NestExpressApplication>(
     AppModule,
     new ExpressAdapter(),
-    { cors: true },
   );
+
+  app.setGlobalPrefix('api/v1', {
+    exclude: ['/', 'documentation', 'documentation-json'],
+  });
+
+  const frontendOrigins = resolveFrontendOrigins();
+  app.enableCors({
+    origin: frontendOrigins,
+    credentials: true,
+  });
+  app.use(cookieParser());
 
   app.useGlobalPipes(
     new ValidationPipe({
@@ -48,18 +57,21 @@ export async function bootstrap(): Promise<NestExpressApplication> {
   });
 
   // Add root route for testing
-  app.getHttpAdapter().getInstance().get('/', (_req: Request, res: Response) => {
-    res.json({
-      status: 'ok',
-      service: 'base-project',
-      timestamp: new Date().toISOString(),
-      endpoints: {
-        health: '/health',
-        documentation: '/documentation',
-        auth: '/auth',
-      },
+  app
+    .getHttpAdapter()
+    .getInstance()
+    .get('/', (_req: Request, res: Response) => {
+      res.json({
+        status: 'ok',
+        service: 'base-project',
+        timestamp: new Date().toISOString(),
+        endpoints: {
+          health: '/health',
+          documentation: '/documentation',
+          auth: '/auth',
+        },
+      });
     });
-  });
   const port = Number(process.env.PORT) || 8081;
   console.log(`Attempting to listen on 0.0.0.0:${port}...`);
 

@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { BackupProfile, DatabaseState, PendingState } from '../types';
+import {
+  type BackupProfile,
+  type DatabaseState,
+  type PendingState,
+} from '../types';
 
 function stateDir(backupDir: string): string {
   return path.join(backupDir, 'state');

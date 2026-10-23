@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import type { SourceGroup } from './types';
+import { type SourceGroup } from './types';
 
 export type BackupVolumeGroup = 'HIS' | 'EMR' | 'LIS';
 
@@ -45,9 +45,7 @@ const LIS_DATABASES = new Set([
   'LabInventory_XP',
 ]);
 
-export function isDevelopmentNodeEnv(
-  nodeEnv = process.env.NODE_ENV,
-): boolean {
+export function isDevelopmentNodeEnv(nodeEnv = process.env.NODE_ENV): boolean {
   return (nodeEnv ?? '').toLowerCase() === 'development';
 }
 
@@ -57,7 +55,7 @@ export function isAbsolutePath(value: string): boolean {
     return true;
   }
 
-  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\');
+  return /^[A-Za-z]:[/\\]/.test(value) || value.startsWith('\\\\');
 }
 
 export function resolvePathMaybeRelative(
@@ -74,7 +72,9 @@ export function resolvePathMaybeRelative(
  * - Relative volume paths join BACKUP_ROOT (or legacy BACKUP_DIR as root).
  * - Dev default root: `../.backup-dev` from cwd (repo `.backup-dev` when cwd is BE).
  */
-export function resolveBackupPaths(inputs: BackupPathInputs): ResolvedBackupPaths {
+export function resolveBackupPaths(
+  inputs: BackupPathInputs,
+): ResolvedBackupPaths {
   const cwd = inputs.cwd ?? process.cwd();
   const isDev = inputs.isDevelopment ?? isDevelopmentNodeEnv();
 
@@ -89,15 +89,18 @@ export function resolveBackupPaths(inputs: BackupPathInputs): ResolvedBackupPath
     );
   }
 
-  const backupRoot = rootRaw
-    ? resolvePathMaybeRelative(rootRaw, cwd)
-    : null;
+  const backupRoot = rootRaw ? resolvePathMaybeRelative(rootRaw, cwd) : null;
 
-  const resolveVolume = (raw: string | undefined, fallbackRel: string): string => {
+  const resolveVolume = (
+    raw: string | undefined,
+    fallbackRel: string,
+  ): string => {
     const value = raw?.trim() || fallbackRel;
+
     if (isAbsolutePath(value)) {
       return value;
     }
+
     if (!backupRoot) {
       throw new Error(
         `Relative volume path "${value}" requires BACKUP_ROOT or BACKUP_DIR`,
@@ -171,10 +174,15 @@ export function applyDevRowLimitPolicy(
     if (rawLimit === undefined) {
       return 100;
     }
+
     if (rawLimit <= 0) {
-      throw new Error(
-        'BACKUP_DEV_ROW_LIMIT must be > 0 in development (yarn dev). Use yarn start for production backups.',
+      // Soft fallback: avoid 500 on every settings read when DB still has 0.
+      // eslint-disable-next-line no-console
+      console.warn(
+        'BACKUP_DEV_ROW_LIMIT is <= 0 in development; using 100. Set app_settings / .env.development to 100.',
       );
+
+      return 100;
     }
 
     return rawLimit;

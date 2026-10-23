@@ -1,5 +1,5 @@
-import { ForbiddenException, type ExecutionContext } from '@nestjs/common';
-import { Reflector } from '@nestjs/core';
+import { type ExecutionContext, ForbiddenException } from '@nestjs/common';
+import { type Reflector } from '@nestjs/core';
 
 import { StaffRole } from '../constants';
 import { RolesGuard } from './roles.guard';
@@ -16,7 +16,9 @@ function createContext(role?: StaffRole): ExecutionContext {
 
 describe('RolesGuard', () => {
   it('allows when no roles required', () => {
-    const reflector = { get: jest.fn().mockReturnValue(undefined) } as unknown as Reflector;
+    const reflector = {
+      get: jest.fn().mockReturnValue(),
+    } as unknown as Reflector;
     const guard = new RolesGuard(reflector);
 
     expect(guard.canActivate(createContext(StaffRole.NURSE))).toBe(true);

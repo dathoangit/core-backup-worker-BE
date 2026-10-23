@@ -16,7 +16,8 @@ describe('Base application (e2e)', () => {
     await app.init();
   });
 
-  it('/health (GET)', () => request(app.getHttpServer()).get('/health').expect(200));
+  it('/health (GET)', () =>
+    request(app.getHttpServer()).get('/health').expect(200));
 
   afterAll(() => app.close());
 });

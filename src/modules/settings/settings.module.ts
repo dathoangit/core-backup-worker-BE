@@ -1,8 +1,8 @@
-import { Module, forwardRef } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
-import { BackupModule } from '../backup/backup.module';
+import { BackupScheduleModule } from '../backup/schedule/backup-schedule.module';
 import { AppSettingEntity } from './entities/app-setting.entity';
 import { SettingsController } from './settings.controller';
 import { SettingsService } from './settings.service';
@@ -11,7 +11,7 @@ import { SettingsService } from './settings.service';
   imports: [
     ConfigModule,
     TypeOrmModule.forFeature([AppSettingEntity]),
-    forwardRef(() => BackupModule),
+    BackupScheduleModule,
   ],
   controllers: [SettingsController],
   providers: [SettingsService],

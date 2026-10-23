@@ -1,9 +1,10 @@
-import type {
-  CallHandler,
-  ExecutionContext,
-  NestInterceptor,
+import {
+  type CallHandler,
+  type ExecutionContext,
+  Injectable,
+  type NestInterceptor,
+  UseInterceptors,
 } from '@nestjs/common';
-import { Injectable, UseInterceptors } from '@nestjs/common';
 
 import { LanguageCode } from '../constants';
 import { ContextProvider } from '../providers';

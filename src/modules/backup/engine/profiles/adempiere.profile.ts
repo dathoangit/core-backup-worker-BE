@@ -1,8 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { Client } from 'pg';
+import { type Client } from 'pg';
 
+import { BackupCancelledError } from '../../errors/backup-cancelled.error';
+import { type BackupProgressSink } from '../../progress/backup-progress.types';
+import {
+  type ChunkResult,
+  type DatabaseRunResult,
+  type DatabaseState,
+  type PendingState,
+  type SkippedTable,
+  type SourceConfig,
+} from '../../types';
 import {
   buildIdRange,
   chunkKey,
@@ -29,14 +39,6 @@ import {
   markChunkComplete,
   saveState,
 } from '../state';
-import type {
-  ChunkResult,
-  DatabaseRunResult,
-  DatabaseState,
-  PendingState,
-  SkippedTable,
-  SourceConfig,
-} from '../../types';
 
 /** Append-only / log-like tables copied by monotonic PK watermark. */
 const APPEND_ONLY: Array<{ table: string; idColumn: string }> = [
@@ -64,6 +66,7 @@ async function persistPending(
 ): Promise<DatabaseState> {
   const next = { ...state, pending };
   saveState(backupDir, database, next);
+
   return next;
 }
 
@@ -81,7 +84,11 @@ async function copyAppendChunks(options: {
   state: DatabaseState;
   pending: PendingState;
   rowLimit?: number;
-}): Promise<{ chunks: ChunkResult[]; state: DatabaseState; pending: PendingState }> {
+}): Promise<{
+  chunks: ChunkResult[];
+  state: DatabaseState;
+  pending: PendingState;
+}> {
   const {
     client,
     backupDir,
@@ -99,18 +106,15 @@ async function copyAppendChunks(options: {
   let { state, pending } = options;
   const chunks: ChunkResult[] = [];
   let ranges = splitIdRange({ fromExclusive, toInclusive }, chunkSize);
+
   if (rowLimit && rowLimit > 0) {
     ranges = ranges.slice(0, 1);
   }
+
   const outDir = path.join(backupDir, 'runs', runId, database, 'append');
 
   for (const range of ranges) {
-    const key = chunkKey(
-      schema,
-      table,
-      range.fromExclusive,
-      range.toInclusive,
-    );
+    const key = chunkKey(schema, table, range.fromExclusive, range.toInclusive);
 
     if (pending.completedChunkKeys.includes(key)) {
       continue;
@@ -180,12 +184,10 @@ async function exportChangedBusinessRows(options: {
   );
 
   const deleteRows = changed.rows.filter((r) => r.has_delete);
+
   if (deleteRows.length > 0) {
     const values = deleteRows
-      .map(
-        (r) =>
-          `('${r.table_name.replaceAll("'", "''")}', ${r.record_id})`,
-      )
+      .map((r) => `('${r.table_name.replaceAll("'", "''")}', ${r.record_id})`)
       .join(',\n');
     const deletesPath = path.join(
       outDir,
@@ -202,16 +204,20 @@ async function exportChangedBusinessRows(options: {
       file: deletesPath,
       rowCount: del.rowCount,
       bytes: del.bytes,
+      sha256: del.sha256,
+      md5: del.md5,
       fromExclusive: fromExclusive.toString(),
       toInclusive: toInclusive.toString(),
     });
   }
 
   const byTable = new Map<string, string[]>();
+
   for (const row of changed.rows) {
     if (row.has_delete) {
       continue;
     }
+
     const list = byTable.get(row.table_name) ?? [];
     list.push(row.record_id);
     byTable.set(row.table_name, list);
@@ -222,11 +228,13 @@ async function exportChangedBusinessRows(options: {
     const physical = tableName.toLowerCase();
     const pkGuess = `${physical}_id`;
     const hasPk = await tableHasColumn(client, schema, physical, pkGuess);
+
     if (!hasPk) {
       continue;
     }
 
     const batchSize = 5000;
+
     for (let i = 0; i < recordIds.length; i += batchSize) {
       const batch = recordIds.slice(i, i + batchSize);
       const file = path.join(
@@ -249,6 +257,8 @@ async function exportChangedBusinessRows(options: {
         file,
         rowCount: result.rowCount,
         bytes: result.bytes,
+        sha256: result.sha256,
+        md5: result.md5,
         fromExclusive: fromExclusive.toString(),
         toInclusive: toInclusive.toString(),
       });
@@ -268,7 +278,13 @@ async function fullDumpReadableTables(options: {
   state: DatabaseState;
   pending: PendingState;
   rowLimit?: number;
-}): Promise<{ chunks: ChunkResult[]; state: DatabaseState; pending: PendingState }> {
+  signal?: AbortSignal;
+  progress?: BackupProgressSink;
+}): Promise<{
+  chunks: ChunkResult[];
+  state: DatabaseState;
+  pending: PendingState;
+}> {
   const {
     client,
     backupDir,
@@ -277,18 +293,24 @@ async function fullDumpReadableTables(options: {
     tables,
     appendOnlyNames,
     rowLimit,
+    signal,
+    progress,
   } = options;
   let { state, pending } = options;
   const chunks: ChunkResult[] = [];
   const outDir = path.join(backupDir, 'runs', runId, database, 'full');
+  const workTables = tables.filter((t) => !appendOnlyNames.has(t.table));
+  let tablesDone = 0;
 
-  for (const table of tables) {
-    if (appendOnlyNames.has(table.table)) {
-      continue;
+  for (const table of workTables) {
+    if (signal?.aborted) {
+      throw new BackupCancelledError(runId);
     }
 
     const key = `full:${table.schema}.${table.table}`;
+
     if (pending.completedChunkKeys.includes(key)) {
+      tablesDone += 1;
       continue;
     }
 
@@ -308,11 +330,21 @@ async function fullDumpReadableTables(options: {
       file: result.file,
       rowCount: result.rowCount,
       bytes: result.bytes,
+      sha256: result.sha256,
+      md5: result.md5,
       fromExclusive: '0',
       toInclusive: 'full',
     });
     pending = markChunkComplete(pending, key);
     state = await persistPending(backupDir, database, state, pending);
+    tablesDone += 1;
+    progress?.onTableProgress({
+      database,
+      table: `${table.schema}.${table.table}`,
+      tablesDone,
+      tablesTotal: workTables.length,
+      rowsDelta: Math.max(result.rowCount, 0),
+    });
   }
 
   return { chunks, state, pending };
@@ -327,6 +359,8 @@ export async function backupAdempiereDatabase(options: {
   chunkSize: bigint;
   mode?: 'incremental' | 'full';
   devRowLimit?: number;
+  signal?: AbortSignal;
+  progress?: BackupProgressSink;
 }): Promise<DatabaseRunResult> {
   const {
     client,
@@ -337,6 +371,8 @@ export async function backupAdempiereDatabase(options: {
     chunkSize,
     mode = 'incremental',
     devRowLimit = 0,
+    signal,
+    progress,
   } = options;
   const rowLimit = devRowLimit > 0 ? devRowLimit : undefined;
   const effectiveChunkSize =
@@ -352,6 +388,7 @@ export async function backupAdempiereDatabase(options: {
   const doFullDump = forceFull || !state.initialFullDone;
 
   const schemas = await findSchemas(client, ['adempiere', 'public']);
+
   if (!schemas.includes('adempiere')) {
     throw new Error('produce: schema adempiere not usable');
   }
@@ -387,6 +424,8 @@ export async function backupAdempiereDatabase(options: {
         state,
         pending,
         rowLimit,
+        signal,
+        progress,
       });
       allChunks.push(...full.chunks);
       state = full.state;
@@ -402,6 +441,7 @@ export async function backupAdempiereDatabase(options: {
       if (appendRange) {
         for (const append of APPEND_ONLY) {
           const exists = tables.some((t) => t.table === append.table);
+
           if (!exists) {
             skippedTables.push({
               schema: 'adempiere',
@@ -417,6 +457,7 @@ export async function backupAdempiereDatabase(options: {
             append.table,
             append.idColumn,
           );
+
           if (!hasCol) {
             skippedTables.push({
               schema: 'adempiere',
@@ -447,7 +488,7 @@ export async function backupAdempiereDatabase(options: {
         }
       }
 
-      if (!doFullDump && range) {
+      if (!doFullDump) {
         const cdcChunks = await exportChangedBusinessRows({
           client,
           backupDir,
@@ -477,6 +518,7 @@ export async function backupAdempiereDatabase(options: {
     };
   } catch (error) {
     saveState(backupDir, database, { ...state, pending });
+
     throw error;
   }
 }

@@ -10,8 +10,9 @@ import { DataSource } from 'typeorm';
 import { HttpExceptionFilter } from './filters/bad-request.filter';
 import { QueryFailedFilter } from './filters/query-failed.filter';
 import { ResponseInterceptor } from './interceptors/responseInterceptor.service';
+import { AlertsModule } from './modules/alerts/alerts.module';
 import { AuthModule } from './modules/auth/auth.module';
-import { BackupModule } from './modules/backup/backup.module';
+import { BackupApiModule } from './modules/backup/backup-api.module';
 import { HealthCheckerModule } from './modules/health-checker/health-checker.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { UserModule } from './modules/user/user.module';
@@ -25,9 +26,7 @@ import { SnakeNamingStrategy } from './snake-naming.strategy';
       envFilePath:
         process.env.NODE_ENV === 'development'
           ? ['.env.development', '.env']
-          : process.env.NODE_ENV === 'production'
-            ? ['.env.production', '.env']
-            : ['.env'],
+          : ['.env'],
     }),
     ThrottlerModule.forRoot({
       throttlers: [{ ttl: 60_000, limit: 60 }],
@@ -49,20 +48,20 @@ import { SnakeNamingStrategy } from './snake-naming.strategy';
           database: configService.get<string>('DB_DATABASE'),
           ...(isMysql
             ? {
-              charset: 'utf8mb4_unicode_ci' as const,
-            }
+                charset: 'utf8mb4_unicode_ci' as const,
+              }
             : {
-              extra: {
-                options: '-c timezone=Asia/Ho_Chi_Minh',
-              },
-            }),
+                extra: {
+                  options: '-c timezone=Asia/Ho_Chi_Minh',
+                },
+              }),
           namingStrategy: new SnakeNamingStrategy(),
           autoLoadEntities: true,
           migrationsRun:
             configService.get<string>('TYPEORM_MIGRATIONS_RUN') === 'true',
           migrations: ['dist/database/migrations/*.js'],
           synchronize: false,
-          logging: process.env.NODE_ENV === 'development',
+          logging: false,
         };
       },
       dataSourceFactory: async (options) => {
@@ -79,7 +78,8 @@ import { SnakeNamingStrategy } from './snake-naming.strategy';
     AuthModule,
     UserModule,
     SettingsModule,
-    BackupModule,
+    BackupApiModule,
+    AlertsModule,
     HealthCheckerModule,
   ],
   providers: [
@@ -89,4 +89,4 @@ import { SnakeNamingStrategy } from './snake-naming.strategy';
     { provide: APP_FILTER, useClass: HttpExceptionFilter },
   ],
 })
-export class AppModule { }
+export class AppModule {}

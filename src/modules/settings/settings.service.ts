@@ -1,39 +1,42 @@
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+
 import {
   ConflictException,
-  ForbiddenException,
-  Inject,
   Injectable,
   Logger,
   MethodNotAllowedException,
-  OnModuleInit,
-  Optional,
-  forwardRef,
+  type OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import type { Repository } from 'typeorm';
-import { randomUUID } from 'node:crypto';
+import { parse as parseDotenv } from 'dotenv';
+import { type Repository } from 'typeorm';
 
-import { BackupService } from '../backup/backup.service';
-import {
-  getSettingDef,
-  isAllowlistedSettingKey,
-  isRestartRequiredSettingKey,
-  SETTING_KEY_DEFS,
-  type SettingCategory,
-  type SettingKeyDef,
-} from './settings.constants';
 import {
   DEFAULT_INCREMENTAL_CRON,
   isPerDatabaseIncrementalCronKey,
 } from '../backup/incremental-schedule';
-import { decryptSecret, encryptSecret } from './settings-crypto';
-import type {
-  CreateSettingDto,
-  SettingResponseDto,
-  UpdateSettingDto,
+import { BackupScheduleReloadBus } from '../backup/schedule/backup-schedule-reload.bus';
+import {
+  type CreateSettingDto,
+  type SettingResponseDto,
+  type UpdateSettingDto,
 } from './dtos/setting.dto';
 import { AppSettingEntity } from './entities/app-setting.entity';
+import {
+  getSettingDef,
+  isAllowlistedSettingKey,
+  isCronHotReloadSettingKey,
+  SETTING_KEY_DEFS,
+  type SettingCategory,
+  type SettingKeyDef,
+} from './settings.constants';
+import { decryptSecret, encryptSecret } from './settings-crypto';
+
+/** Default path for one-shot settings bootstrap (not loaded into process.env). */
+const DEFAULT_SETTINGS_SEED_FILE = '.env.settings';
 
 @Injectable()
 export class SettingsService implements OnModuleInit {
@@ -43,32 +46,86 @@ export class SettingsService implements OnModuleInit {
     @InjectRepository(AppSettingEntity)
     private readonly repo: Repository<AppSettingEntity>,
     private readonly configService: ConfigService,
-    @Optional()
-    @Inject(forwardRef(() => BackupService))
-    private readonly backupService?: BackupService,
+    private readonly scheduleReloadBus: BackupScheduleReloadBus,
   ) {}
 
   async onModuleInit(): Promise<void> {
     try {
-      await this.seedFromEnvIfEmpty();
+      // Prefer SETTINGS_SEED_FILE (.env.settings) so runtime .env stays minimal.
+      const fromSeed = await this.seedFromSeedFileIfEmpty();
+
+      if (fromSeed === 0) {
+        await this.seedFromEnvIfEmpty();
+      }
+
       await this.ensureMissingAllowlistedSettings();
-      await this.fillEmptySettingsFromEnv();
+      await this.fillEmptySettingsFromSeedOrEnv();
     } catch (error) {
       this.logger.warn(
-        `Settings seed skipped: ${error instanceof Error ? error.message : String(error)}`,
+        `Settings seed skipped: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       );
     }
   }
 
+  /**
+   * First boot: insert allowlisted settings from SETTINGS_SEED_FILE (default
+   * `.env.settings`). Secrets are encrypted with SETTINGS_SECRET_KEY.
+   * Does not mutate process.env — runtime .env can stay infrastructure-only.
+   */
+  async seedFromSeedFileIfEmpty(): Promise<number> {
+    const count = await this.repo.count();
+
+    if (count > 0) {
+      return 0;
+    }
+
+    const seed = this.loadSeedFileValues();
+
+    if (!seed) {
+      return 0;
+    }
+
+    let inserted = 0;
+
+    for (const def of SETTING_KEY_DEFS) {
+      const value = this.valueFromSeedOrDefaults(def.key, seed);
+
+      if (value === undefined) {
+        continue;
+      }
+
+      const row = this.repo.create({
+        id: randomUUID() as Uuid,
+        key: def.key,
+        category: def.category,
+        isSecret: def.isSecret,
+        value: def.isSecret ? this.encryptOrThrow(value) : value,
+      });
+      await this.repo.save(row);
+      inserted += 1;
+    }
+
+    this.logger.log(
+      `Seeded ${inserted} settings from seed file (${this.resolveSeedFilePath()})`,
+    );
+
+    return inserted;
+  }
+
   async seedFromEnvIfEmpty(): Promise<number> {
     const count = await this.repo.count();
+
     if (count > 0) {
       return 0;
     }
 
     let inserted = 0;
+
     for (const def of SETTING_KEY_DEFS) {
       const value = this.defaultValueForKey(def.key);
+
       if (value === undefined) {
         continue;
       }
@@ -95,14 +152,17 @@ export class SettingsService implements OnModuleInit {
    * Never overwrites values the operator already set.
    */
   async ensureMissingAllowlistedSettings(): Promise<number> {
+    const seed = this.loadSeedFileValues() ?? {};
     let inserted = 0;
+
     for (const def of SETTING_KEY_DEFS) {
       const existing = await this.repo.findOne({ where: { key: def.key } });
+
       if (existing) {
         continue;
       }
 
-      const value = this.defaultValueForKey(def.key);
+      const value = this.valueFromSeedOrDefaults(def.key, seed);
       const stored =
         value === undefined
           ? null
@@ -129,13 +189,16 @@ export class SettingsService implements OnModuleInit {
   }
 
   /**
-   * Fills allowlisted rows that exist but have an empty value, from process env.
-   * Does not overwrite non-empty DB values (use `yarn settings:sync-from-env -- --force`).
+   * Fills allowlisted rows that exist but have an empty value.
+   * Prefers SETTINGS_SEED_FILE, then process env. Never overwrites non-empty DB values.
    */
-  async fillEmptySettingsFromEnv(): Promise<number> {
+  async fillEmptySettingsFromSeedOrEnv(): Promise<number> {
+    const seed = this.loadSeedFileValues() ?? {};
     let filled = 0;
+
     for (const def of SETTING_KEY_DEFS) {
       const existing = await this.repo.findOne({ where: { key: def.key } });
+
       if (!existing) {
         continue;
       }
@@ -148,7 +211,8 @@ export class SettingsService implements OnModuleInit {
         continue;
       }
 
-      const value = this.defaultValueForKey(def.key);
+      const value = this.valueFromSeedOrDefaults(def.key, seed);
+
       if (value === undefined) {
         continue;
       }
@@ -159,14 +223,71 @@ export class SettingsService implements OnModuleInit {
     }
 
     if (filled > 0) {
-      this.logger.log(`Filled ${filled} empty setting(s) from env`);
+      this.logger.log(`Filled ${filled} empty setting(s) from seed file / env`);
     }
 
     return filled;
   }
 
+  /** @deprecated Use fillEmptySettingsFromSeedOrEnv */
+  async fillEmptySettingsFromEnv(): Promise<number> {
+    return this.fillEmptySettingsFromSeedOrEnv();
+  }
+
+  private resolveSeedFilePath(): string {
+    const raw =
+      this.configService.get<string>('SETTINGS_SEED_FILE')?.trim() ||
+      DEFAULT_SETTINGS_SEED_FILE;
+
+    return path.isAbsolute(raw) ? raw : path.resolve(process.cwd(), raw);
+  }
+
+  /** Parse seed file without loading into process.env. */
+  private loadSeedFileValues(): Record<string, string> | null {
+    const filePath = this.resolveSeedFilePath();
+
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+
+    try {
+      const parsed = parseDotenv(fs.readFileSync(filePath));
+      const out: Record<string, string> = {};
+
+      for (const [key, value] of Object.entries(parsed)) {
+        if (value !== undefined && value !== '') {
+          out[key] = value;
+        }
+      }
+
+      return out;
+    } catch (error) {
+      this.logger.warn(
+        `Failed to read settings seed file ${filePath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+
+      return null;
+    }
+  }
+
+  private valueFromSeedOrDefaults(
+    key: string,
+    seed: Record<string, string>,
+  ): string | undefined {
+    const fromSeed = seed[key];
+
+    if (fromSeed !== undefined && fromSeed !== '') {
+      return fromSeed;
+    }
+
+    return this.defaultValueForKey(key);
+  }
+
   private defaultValueForKey(key: string): string | undefined {
     const fromEnv = this.configService.get<string>(key);
+
     if (fromEnv !== undefined && fromEnv !== null && fromEnv !== '') {
       return fromEnv;
     }
@@ -185,6 +306,7 @@ export class SettingsService implements OnModuleInit {
 
     if (key.startsWith('BACKUP_INCREMENTAL_CRON_')) {
       const database = key.slice('BACKUP_INCREMENTAL_CRON_'.length);
+
       if (!database) {
         return undefined;
       }
@@ -200,22 +322,43 @@ export class SettingsService implements OnModuleInit {
       return '0';
     }
 
+    if (key === 'BACKUP_RETENTION_DAYS') {
+      return '15';
+    }
+
+    if (key === 'ALERT_DISK_FREE_THRESHOLD_PERCENT') {
+      return '15';
+    }
+
+    if (
+      key === 'ALERT_TELEGRAM_ENABLED' ||
+      key === 'ALERT_EMAIL_ENABLED' ||
+      key === 'ALERT_SMTP_SECURE'
+    ) {
+      return 'false';
+    }
+
     return undefined;
   }
 
   /**
-   * Resolved plaintext value: DB first, then env fallback.
+   * Resolved plaintext value: DB first.
+   * Secrets (*_PASSWORD / isSecret) never fall back to env — runtime reads DB only.
+   * Non-secrets may fall back to env when the DB row is empty.
    * Decrypts secrets transparently.
    */
   async get(key: string): Promise<string | undefined> {
     const row = await this.repo.findOne({ where: { key } });
+
     if (row?.value !== null && row?.value !== undefined && row.value !== '') {
       if (row.isSecret) {
         try {
           return decryptSecret(row.value, this.secretKey());
         } catch (error) {
           this.logger.warn(
-            `Failed to decrypt ${key}: ${error instanceof Error ? error.message : String(error)}`,
+            `Failed to decrypt ${key}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
           );
 
           return undefined;
@@ -225,11 +368,25 @@ export class SettingsService implements OnModuleInit {
       return row.value;
     }
 
+    if (this.isSecretSettingKey(key)) {
+      return undefined;
+    }
+
     const fromEnv = this.configService.get<string>(key);
 
     return fromEnv === null || fromEnv === undefined || fromEnv === ''
       ? undefined
       : fromEnv;
+  }
+
+  private isSecretSettingKey(key: string): boolean {
+    const def = getSettingDef(key);
+
+    if (def?.isSecret) {
+      return true;
+    }
+
+    return key.endsWith('_PASSWORD');
   }
 
   async getOrDefault(key: string, fallback: string): Promise<string> {
@@ -262,6 +419,7 @@ export class SettingsService implements OnModuleInit {
       if (seen.has(row.key) || !isAllowlistedSettingKey(row.key)) {
         continue;
       }
+
       result.push(this.toResponse(row));
     }
 
@@ -277,6 +435,7 @@ export class SettingsService implements OnModuleInit {
   async getOne(key: string): Promise<SettingResponseDto> {
     this.assertAllowlisted(key);
     const row = await this.repo.findOne({ where: { key } });
+
     if (row) {
       return this.toResponse(row);
     }
@@ -294,11 +453,15 @@ export class SettingsService implements OnModuleInit {
    * Upsert allowlisted setting. Missing rows (e.g. EMR_PASSWORD never seeded)
    * are created so operators can fill secrets from the FE without editing env.
    */
-  async update(key: string, dto: UpdateSettingDto): Promise<SettingResponseDto> {
+  async update(
+    key: string,
+    dto: UpdateSettingDto,
+    options?: { skipScheduleReload?: boolean },
+  ): Promise<SettingResponseDto> {
     this.assertAllowlisted(key);
-    await this.assertCanMutateRestartRequiredKey(key);
 
     let row = await this.repo.findOne({ where: { key } });
+
     if (!row) {
       const def = this.resolveSettingDef(key);
       row = this.repo.create({
@@ -320,6 +483,18 @@ export class SettingsService implements OnModuleInit {
 
     const saved = await this.repo.save(row);
 
+    if (!options?.skipScheduleReload && isCronHotReloadSettingKey(key)) {
+      try {
+        await this.scheduleReloadBus.requestReload();
+      } catch (error) {
+        this.logger.warn(
+          `Schedule reload after updating ${key} failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+
     return this.toResponse(saved);
   }
 
@@ -339,6 +514,7 @@ export class SettingsService implements OnModuleInit {
 
   private resolveSettingDef(key: string): SettingKeyDef {
     const def = getSettingDef(key);
+
     if (def) {
       return def;
     }
@@ -368,25 +544,6 @@ export class SettingsService implements OnModuleInit {
     };
   }
 
-  private async assertCanMutateRestartRequiredKey(key: string): Promise<void> {
-    if (!isRestartRequiredSettingKey(key)) {
-      return;
-    }
-
-    if (!this.backupService) {
-      return;
-    }
-
-    if (await this.backupService.isBackupInProgress()) {
-      const runId = this.backupService.getInFlightRunId();
-      throw new ForbiddenException(
-        runId
-          ? `Cannot change ${key} while backup ${runId} is running. Wait for it to finish, then restart the backend after updating cron/timezone.`
-          : `Cannot change ${key} while a backup is in progress (lock held). Wait for it to finish, then restart the backend after updating cron/timezone.`,
-      );
-    }
-  }
-
   private secretKey(): string {
     return this.configService.get<string>('SETTINGS_SECRET_KEY') ?? '';
   }
@@ -396,7 +553,8 @@ export class SettingsService implements OnModuleInit {
   }
 
   private toResponse(row: AppSettingEntity): SettingResponseDto {
-    const hasValue = row.value !== null && row.value !== undefined && row.value !== '';
+    const hasValue =
+      row.value !== null && row.value !== undefined && row.value !== '';
 
     return {
       id: row.id,

@@ -1,4 +1,9 @@
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  randomBytes,
+  scryptSync,
+} from 'node:crypto';
 
 const PREFIX = 'enc:v1:';
 
@@ -14,12 +19,14 @@ export function resolveSettingsKey(raw: string | undefined): Uint8Array {
   }
 
   const trimmed = raw.trim();
-  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+
+  if (/^[\dA-Fa-f]{64}$/.test(trimmed)) {
     return new Uint8Array(Buffer.from(trimmed, 'hex'));
   }
 
   try {
     const b64 = Buffer.from(trimmed, 'base64');
+
     if (b64.length === 32) {
       return new Uint8Array(b64);
     }
@@ -40,7 +47,9 @@ export function encryptSecret(plaintext: string, keyMaterial: string): string {
   ]);
   const tag = new Uint8Array(cipher.getAuthTag());
 
-  return `${PREFIX}${Buffer.from(iv).toString('base64url')}.${Buffer.from(tag).toString('base64url')}.${encrypted.toString('base64url')}`;
+  return `${PREFIX}${Buffer.from(iv).toString('base64url')}.${Buffer.from(
+    tag,
+  ).toString('base64url')}.${encrypted.toString('base64url')}`;
 }
 
 export function decryptSecret(ciphertext: string, keyMaterial: string): string {
@@ -51,6 +60,7 @@ export function decryptSecret(ciphertext: string, keyMaterial: string): string {
   const key = resolveSettingsKey(keyMaterial);
   const body = ciphertext.slice(PREFIX.length);
   const [ivB64, tagB64, dataB64] = body.split('.');
+
   if (!ivB64 || !tagB64 || !dataB64) {
     throw new Error('Invalid encrypted setting payload');
   }

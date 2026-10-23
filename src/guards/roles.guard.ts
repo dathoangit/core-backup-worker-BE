@@ -1,7 +1,7 @@
 import {
-  ForbiddenException,
   type CanActivate,
   type ExecutionContext,
+  ForbiddenException,
   Injectable,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -20,7 +20,10 @@ export class RolesGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
-    const roles = this.reflector.get<StaffRole[]>('roles', context.getHandler());
+    const roles = this.reflector.get<StaffRole[]>(
+      'roles',
+      context.getHandler(),
+    );
 
     if (_.isEmpty(roles)) {
       return true;
@@ -35,7 +38,9 @@ export class RolesGuard implements CanActivate {
       throw new ForbiddenException('Missing role');
     }
 
-    const requiredRank = Math.min(...roles.map((requiredRole) => ROLE_RANK[requiredRole]));
+    const requiredRank = Math.min(
+      ...roles.map((requiredRole) => ROLE_RANK[requiredRole]),
+    );
 
     if (ROLE_RANK[role] >= requiredRank) {
       return true;

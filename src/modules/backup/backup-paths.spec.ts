@@ -1,5 +1,6 @@
-import { describe, expect, it } from '@jest/globals';
 import path from 'node:path';
+
+import { describe, expect, it } from '@jest/globals';
 
 import {
   applyDevRowLimitPolicy,
@@ -61,7 +62,7 @@ describe('backup-paths', () => {
   it('enforces dev vs production row-limit policy', () => {
     expect(applyDevRowLimitPolicy(undefined, true)).toBe(100);
     expect(applyDevRowLimitPolicy(50, true)).toBe(50);
-    expect(() => applyDevRowLimitPolicy(0, true)).toThrow(/development/);
+    expect(applyDevRowLimitPolicy(0, true)).toBe(100);
     expect(applyDevRowLimitPolicy(undefined, false)).toBe(0);
     expect(applyDevRowLimitPolicy(0, false)).toBe(0);
     expect(() => applyDevRowLimitPolicy(10, false)).toThrow(/production/);

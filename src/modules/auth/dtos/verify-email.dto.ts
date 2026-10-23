@@ -1,4 +1,8 @@
-import { EmailField, EnumField, StringFieldOptional } from '../../../decorators';
+import {
+  EmailField,
+  EnumField,
+  StringFieldOptional,
+} from '../../../decorators';
 import { EmailVerificationMethod } from '../entities/email-verification.entity';
 
 export class VerifyEmailDto {

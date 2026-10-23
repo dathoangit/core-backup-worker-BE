@@ -1,9 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 
-import { BackupConfigService } from './backup-config.service';
 import { BackupService } from './backup.service';
+import { BackupConfigService } from './backup-config.service';
 import { BackupRunnerService } from './engine/backup-runner.service';
+import { BackupCancelRegistry } from './queue/backup-cancel.registry';
 import { SourceRegistry } from './source-registry';
 import { ARCHIVE_TARGET } from './zones/archive-target.interface';
 import { NoopArchiveTarget } from './zones/noop-archive-target';
@@ -22,14 +23,13 @@ import { RetentionService } from './zones/retention.service';
       envFilePath:
         process.env.NODE_ENV === 'development'
           ? ['.env.development', '.env']
-          : process.env.NODE_ENV === 'production'
-            ? ['.env.production', '.env']
-            : ['.env'],
+          : ['.env'],
     }),
   ],
   providers: [
     BackupConfigService,
     SourceRegistry,
+    BackupCancelRegistry,
     BackupRunnerService,
     PrimaryZoneService,
     RetentionService,

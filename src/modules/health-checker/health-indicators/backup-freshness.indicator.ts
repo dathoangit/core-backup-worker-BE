@@ -19,20 +19,24 @@ export class BackupFreshnessIndicator extends HealthIndicator {
 
   async isHealthy(key: string): Promise<HealthIndicatorResult> {
     const backupDir = this.configService.get<string>('BACKUP_DIR')?.trim();
+
     if (!backupDir) {
       // Also try DB-backed setting via freshness itself; if BACKUP_DIR unset in env,
       // getFreshness may still succeed when settings were seeded.
       try {
         const freshness = await this.backupService.getFreshness();
+
         if (freshness.lastSuccessAt || freshness.healthy) {
           const result = this.getStatus(key, freshness.healthy, {
             lastSuccessAt: freshness.lastSuccessAt,
             ageHours: freshness.ageHours,
             maxAgeHours: freshness.maxAgeHours,
           });
+
           if (freshness.healthy) {
             return result;
           }
+
           throw new HealthCheckError('Backup freshness check failed', result);
         }
       } catch (error) {
@@ -68,6 +72,7 @@ export class BackupFreshnessIndicator extends HealthIndicator {
       const result = this.getStatus(key, false, {
         error: error instanceof Error ? error.message : String(error),
       });
+
       throw new HealthCheckError('Backup freshness check failed', result);
     }
   }

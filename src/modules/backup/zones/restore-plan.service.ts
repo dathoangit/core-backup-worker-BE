@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import { Injectable, NotFoundException } from '@nestjs/common';
 
-import type { RunManifest } from '../types';
+import { type RunManifest } from '../types';
 import { PrimaryZoneService } from './primary-zone.service';
 
 export interface RestorePlanStep {
@@ -26,6 +26,7 @@ export class RestorePlanService {
 
   async buildPlan(database: string): Promise<RestorePlan> {
     const runIds = await this.primaryZone.listRunIds();
+
     if (runIds.length === 0) {
       throw new NotFoundException(
         `No backup runs under backup volumes for ${database}`,
@@ -43,6 +44,7 @@ export class RestorePlanService {
     let order = 1;
 
     const snapshotDir = path.join(volumeDir, 'snapshots', database);
+
     if (fs.existsSync(snapshotDir)) {
       for (const file of this.listGzipFiles(snapshotDir)) {
         steps.push({
@@ -59,11 +61,13 @@ export class RestorePlanService {
       const manifest = (await this.primaryZone.readManifest(
         runId,
       )) as RunManifest | null;
+
       if (!manifest) {
         continue;
       }
 
       const dbResult = manifest.databases.find((d) => d.database === database);
+
       if (!dbResult || dbResult.status !== 'ok') {
         continue;
       }
@@ -72,13 +76,17 @@ export class RestorePlanService {
         await this.primaryZone.runDirForDatabase(runId, database),
         database,
       );
+
       for (const kind of ['full', 'append', 'cdc'] as const) {
         const kindDir = path.join(dbDir, kind);
+
         if (!fs.existsSync(kindDir)) {
           continue;
         }
 
-        for (const file of this.listGzipFiles(kindDir).sort()) {
+        for (const file of this.listGzipFiles(kindDir).sort((a, b) =>
+          this.compareChunkFiles(a, b),
+        )) {
           steps.push({
             order: order++,
             kind,
@@ -104,5 +112,24 @@ export class RestorePlanService {
       .readdirSync(dir)
       .filter((f) => f.endsWith('.csv.gz'))
       .map((f) => path.join(dir, f));
+  }
+
+  /** Prefer schema.table.000001.csv.gz before schema.table.000002.csv.gz. */
+  private compareChunkFiles(a: string, b: string): number {
+    const baseA = path.basename(a);
+    const baseB = path.basename(b);
+    const seqA = baseA.match(/\.(\d{6})\.csv\.gz$/)?.[1];
+    const seqB = baseB.match(/\.(\d{6})\.csv\.gz$/)?.[1];
+
+    if (
+      seqA &&
+      seqB &&
+      baseA.replace(`.${seqA}.csv.gz`, '') ===
+        baseB.replace(`.${seqB}.csv.gz`, '')
+    ) {
+      return Number.parseInt(seqA, 10) - Number.parseInt(seqB, 10);
+    }
+
+    return baseA.localeCompare(baseB);
   }
 }

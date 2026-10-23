@@ -1,12 +1,14 @@
 import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
+import { type Request } from 'express';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 
-import { StaffRole, TokenType } from '../../../constants';
+import { type StaffRole, TokenType } from '../../../constants';
 import { RedisCacheService } from '../../cache/redis-cache.service';
 import { UserEntity } from '../../user/user.entity';
 import { UserService } from '../../user/user.service';
+import { AUTH_ACCESS_COOKIE_NAME } from '../auth-cookie.util';
 import {
   AUTH_SESSION_KEY_PREFIX,
   AUTH_USER_CACHE_KEY_PREFIX,
@@ -14,6 +16,13 @@ import {
 } from '../auth-redis.constants';
 import { resolveJwtKey } from '../jwt-keys.util';
 import { type IJwtAccessPayload } from '../types/jwt-access-payload.type';
+
+function extractAccessTokenFromCookie(request: Request): string | null {
+  const cookies = request.cookies as Record<string, unknown> | undefined;
+  const value = cookies?.[AUTH_ACCESS_COOKIE_NAME];
+
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
 
 interface ICachedAuthUser {
   id: Uuid;
@@ -48,17 +57,22 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     }
 
     super({
-      jwtFromRequest: (request) => {
-        const authorization = request?.headers?.authorization;
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        extractAccessTokenFromCookie,
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+        (request: Request) => {
+          // EventSource cannot set Authorization; allow ?access_token= on SSE streams only.
+          const path = request.path || request.url || '';
 
-        if (!authorization) {
-          this.logger.warn('Missing Authorization header');
-        } else if (!authorization.startsWith('Bearer ')) {
-          this.logger.warn('Authorization header is not Bearer format');
-        }
+          if (!path.includes('/stream')) {
+            return null;
+          }
 
-        return ExtractJwt.fromAuthHeaderAsBearerToken()(request);
-      },
+          const token = request.query?.access_token;
+
+          return typeof token === 'string' && token.length > 0 ? token : null;
+        },
+      ]),
       ignoreExpiration: false,
       secretOrKey: publicKey,
       algorithms: ['RS256'],

@@ -10,7 +10,7 @@ NestJS base API: JWT auth (RS256 + Redis session), role-based access (`StaffRole
 
 | I need to… | Open first | Deep dive |
 |------------|------------|-----------|
-| Understand the whole backend | This file | — |
+| Understand the whole backend | This file | [`docs/luong-he-thong.md`](./docs/luong-he-thong.md) |
 | Auth login / JWT / session / Google / email / reset | [`docs/auth.md`](./docs/auth.md) | `src/modules/auth/` |
 | Roles & protecting endpoints | [`docs/roles.md`](./docs/roles.md) | `src/guards/`, `src/decorators/`, `src/constants/staff-role.ts` |
 | Admin user CRUD APIs | [`docs/admin-users.md`](./docs/admin-users.md) | `src/modules/user/` |

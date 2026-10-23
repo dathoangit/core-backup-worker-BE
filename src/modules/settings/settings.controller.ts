@@ -18,7 +18,7 @@ import {
   SettingResponseDto,
   UpdateSettingDto,
 } from './dtos/setting.dto';
-import type { SettingCategory } from './settings.constants';
+import { type SettingCategory } from './settings.constants';
 import { SettingsService } from './settings.service';
 
 @Controller('admin/settings')

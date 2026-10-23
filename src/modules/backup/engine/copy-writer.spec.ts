@@ -5,7 +5,7 @@ import { withDevRowLimit } from './copy-writer';
 describe('withDevRowLimit', () => {
   it('returns original SQL when limit unset or <= 0', () => {
     const sql = 'SELECT * FROM foo';
-    expect(withDevRowLimit(sql, undefined)).toBe(sql);
+    expect(withDevRowLimit(sql)).toBe(sql);
     expect(withDevRowLimit(sql, 0)).toBe(sql);
     expect(withDevRowLimit(sql, -1)).toBe(sql);
   });

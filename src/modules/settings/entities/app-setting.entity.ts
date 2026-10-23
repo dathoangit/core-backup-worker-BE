@@ -1,7 +1,7 @@
 import { Column, Entity, Index } from 'typeorm';
 
 import { AbstractEntity } from '../../../common/abstract.entity';
-import type { SettingCategory } from '../settings.constants';
+import { type SettingCategory } from '../settings.constants';
 
 @Entity({ name: 'app_settings' })
 export class AppSettingEntity extends AbstractEntity {

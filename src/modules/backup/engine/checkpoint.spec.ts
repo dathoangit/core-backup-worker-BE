@@ -50,8 +50,8 @@ describe('splitIdRange', () => {
 
 describe('watermark helpers', () => {
   it('round-trips bigint watermarks as strings', () => {
-    expect(formatWatermark(1163406409n)).toBe('1163406409');
-    expect(parseWatermark('1163406409')).toBe(1163406409n);
+    expect(formatWatermark(1_163_406_409n)).toBe('1163406409');
+    expect(parseWatermark('1163406409')).toBe(1_163_406_409n);
     expect(parseWatermark(null)).toBeNull();
   });
 

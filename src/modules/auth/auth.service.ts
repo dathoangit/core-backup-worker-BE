@@ -15,17 +15,21 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 
 import { generateHash, validateHash } from '../../common/utils';
-import { TokenType, StaffRole } from '../../constants';
+import { StaffRole, TokenType } from '../../constants';
 import { RedisCacheService } from '../cache/redis-cache.service';
 import { type UserDto } from '../user/dtos/user.dto';
 import { type UserEntity } from '../user/user.entity';
 import { UserService } from '../user/user.service';
+import {
+  AUTH_SESSION_KEY_PREFIX,
+  AUTH_USER_CACHE_KEY_PREFIX,
+} from './auth-redis.constants';
 import { type AuthTokenDto } from './dtos/auth-token.dto';
 import { type ForgotPasswordDto } from './dtos/forgot-password.dto';
 import { type ForgotPasswordResponseDto } from './dtos/forgot-password-response.dto';
 import { type LoginDto } from './dtos/login.dto';
-import { type RequestEmailVerificationDto } from './dtos/request-email-verification.dto';
 import { type RegisterDto } from './dtos/register.dto';
+import { type RequestEmailVerificationDto } from './dtos/request-email-verification.dto';
 import { type ResetPasswordDto } from './dtos/reset-password.dto';
 import { type UpdateEmailDto } from './dtos/update-email.dto';
 import { type VerifyEmailDto } from './dtos/verify-email.dto';
@@ -36,7 +40,6 @@ import {
 import { PasswordResetTokenEntity } from './entities/password-reset-token.entity';
 import { UserOauthIdentityEntity } from './entities/user-oauth-identity.entity';
 import { getJwtExpirationSeconds } from './jwt-expiration.util';
-import { AUTH_SESSION_KEY_PREFIX, AUTH_USER_CACHE_KEY_PREFIX } from './auth-redis.constants';
 import { type IJwtAccessPayload } from './types/jwt-access-payload.type';
 
 @Injectable()
@@ -145,6 +148,17 @@ export class AuthService {
     return user.toDto();
   }
 
+  async logout(user: UserEntity): Promise<void> {
+    await this.redisCacheService.delete(
+      this.buildAuthSessionKey(user.id),
+      `auth-session logout userId=${user.id}`,
+    );
+    await this.redisCacheService.delete(
+      `${AUTH_USER_CACHE_KEY_PREFIX}:${user.id}`,
+      `auth-user logout userId=${user.id}`,
+    );
+  }
+
   async updateEmail(user: UserEntity, dto: UpdateEmailDto): Promise<void> {
     const normalizedEmail = dto.email.trim().toLowerCase();
     const existing = await this.userService.findByEmail(normalizedEmail);
@@ -251,9 +265,8 @@ export class AuthService {
     }
 
     if (!user) {
-      const generatedUsername = await this.generateUniqueUsernameFromEmail(
-        normalizedEmail,
-      );
+      const generatedUsername =
+        await this.generateUniqueUsernameFromEmail(normalizedEmail);
       user = await this.userService.createUser({
         username: generatedUsername,
         email: normalizedEmail,
@@ -306,7 +319,9 @@ export class AuthService {
 
     // Do not log the raw token or email; integrate email delivery here in production.
     this.logger.log(
-      `Password reset token issued userId=${user.id} rowId=${saved.id} expiresAt=${saved.expiresAt.toISOString()}`,
+      `Password reset token issued userId=${user.id} rowId=${
+        saved.id
+      } expiresAt=${saved.expiresAt.toISOString()}`,
     );
 
     return { message: AuthService.forgotPasswordGenericMessage };
@@ -438,8 +453,10 @@ export class AuthService {
     email: string | null,
   ): Promise<string> {
     const base =
-      email?.split('@')[0]?.replace(/[^a-z0-9_]/g, '').slice(0, 24) ||
-      'google_user';
+      email
+        ?.split('@')[0]
+        ?.replace(/[^\d_a-z]/g, '')
+        .slice(0, 24) || 'google_user';
     let username = base.length >= 3 ? base : `user_${base}`;
     let counter = 0;
 

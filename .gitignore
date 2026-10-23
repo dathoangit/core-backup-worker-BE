@@ -59,6 +59,8 @@ typings/
 # dotenv environment variables file
 .env
 .env.production
+# Settings bootstrap (may contain plaintext source passwords before encrypt-to-DB)
+.env.settings
 
 # next.js build output
 .next

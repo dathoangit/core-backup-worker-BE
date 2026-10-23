@@ -123,50 +123,49 @@ What happens:
 
 ## Settings in app DB
 
-`BACKUP_*` and `HIS_*` / `EMR_*` / `BADL_*` / `LIS_*` are stored in the app DB table
-`app_settings` (seeded from env on first boot; empty/missing allowlisted keys are
-created so the FE can edit them). Runtime reads **DB first**, then env.
+Runtime `.env` / `.env.production` stay **infrastructure-only**: `NODE_ENV`, `PORT`,
+JWT keys, `DB_*`, Redis, `SETTINGS_SECRET_KEY`, `SETTINGS_SEED_FILE`.
 
-Missing secrets (e.g. `EMR_PASSWORD` never seeded) appear on the FE as empty —
-use **Sửa** to upsert; no env change required. `PUT /admin/settings/:key` creates
-the row when absent.
+All backup config (`BACKUP_*` volumes/cron/retention, `HIS_*` / `EMR_*` / `LIS_*` /
+`BADL_*`, alerts) lives in `app_settings`. Runtime reads **DB first**. Secrets
+(`*_PASSWORD`) are stored encrypted (`enc:v1:…`) and **never** fall back to env.
 
-### Sync credentials from env → DB
+### Fresh production deploy
 
-When production was seeded with empty `EMR_PASSWORD` (etc.), push passwords from an
-env file without wiping volume paths:
+1. Copy `.env.production.example` → `.env.production` (fill DB/Redis/JWT/`SETTINGS_SECRET_KEY`).
+2. Copy `.env.settings.example` → `.env.settings` (fill source passwords + confirm volumes).
+3. `docker compose up` — first boot with an empty `app_settings` table seeds from
+   `.env.settings` (see `SETTINGS_SEED_FILE`) and encrypts passwords.
+4. Optional: delete `.env.settings` from the host after a successful seed; further
+   edits via FE **Cấu hình** (`/config`).
+
+### Sync / re-seed from seed file
 
 ```bash
-# Preview (sources only: HIS_/EMR_/LIS_/BADL_)
-yarn settings:sync-from-env -- --env-file=.env.production --dry-run
+# Preview
+yarn settings:sync-from-env -- --env-file=.env.settings --all --include-paths --dry-run
 
-# Write missing/empty source settings
-yarn settings:sync-from-env -- --env-file=.env.production
+# Fill missing/empty only
+yarn settings:sync-from-env -- --env-file=.env.settings --all --include-paths
 
-# Overwrite existing source settings from the env file
-yarn settings:sync-from-env -- --env-file=.env.production --force
+# Overwrite DB values from the seed file
+yarn settings:sync-from-env -- --env-file=.env.settings --all --include-paths --force
 ```
 
-`SETTINGS_SECRET_KEY` in that env file **must match** the running app (encrypts
-`*_PASSWORD`). Point `DB_*` at the same app database the container uses. After sync,
-reload FE Databases — EMR should show `ready` when user/password are set.
-
-Use `--all` to sync cron/schedule keys too; add `--include-paths` only when you
-intentionally want to overwrite `BACKUP_VOLUME_*` / `BACKUP_ROOT`.
+`SETTINGS_SECRET_KEY` in runtime env **must match** the key used to encrypt rows.
+Point `DB_*` at the same app database the container uses.
 
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/admin/settings?category=backup` | List (secrets masked) |
 | `GET` | `/admin/settings/:key` | One key |
-| `POST` | `/admin/settings` | Create (allowlisted keys) |
 | `PUT` | `/admin/settings/:key` | Upsert |
-| `DELETE` | `/admin/settings/:key` | Delete |
 
 Require login (`@Auth()` only — no role check).  
-`SETTINGS_SECRET_KEY` encrypts `*_PASSWORD` values. Changing cron strings in DB
-requires **process restart** (Nest `@Cron` is fixed at boot from env).
+Cron/timezone changes hot-reload via `ScheduleRegistry` (no restart). Do not edit
+cron while a backup is running.
 
-`DB_*` connection settings stay in `.env` only (not stored in `app_settings`).
+`DB_*` / Redis / JWT stay in `.env` only (not stored in `app_settings`).
 
 ## Admin API
 

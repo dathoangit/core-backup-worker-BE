@@ -1,4 +1,4 @@
-import { type TokenType, type StaffRole } from '../../../constants';
+import { type StaffRole, type TokenType } from '../../../constants';
 
 export interface IJwtAccessPayload {
   sub: Uuid;

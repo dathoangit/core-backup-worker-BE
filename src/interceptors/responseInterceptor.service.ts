@@ -11,8 +11,16 @@ import { map } from 'rxjs/operators';
 const SUCCESS_MESSAGE = 'Successfully';
 const NO_CONTENT_STATUS_CODE = 204;
 const NOT_MODIFIED_STATUS_CODE = 304;
-const SKIP_PATHS = new Set(['/health']);
-const SKIP_PREFIXES = ['/documentation'];
+const SKIP_PATHS = new Set(['/health', '/api/v1/health']);
+const SKIP_PREFIXES = [
+  '/documentation',
+  '/admin/backup/stream',
+  '/api/v1/admin/backup/stream',
+  '/public/backup/stream',
+  '/api/v1/public/backup/stream',
+  '/runs/',
+  '/api/v1/runs/',
+];
 
 @Injectable()
 export class ResponseInterceptor<T> implements NestInterceptor<T> {

@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  forwardRef,
   Inject,
   Injectable,
   Logger,
@@ -7,19 +8,21 @@ import {
   Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import type { Repository } from 'typeorm';
+import { type Repository } from 'typeorm';
 
 import { BackupConfigService } from './backup-config.service';
-import { BackupRunnerService } from './engine/backup-runner.service';
-import { acquireLock } from './engine/lock';
-import { createRunId } from './engine/manifest';
-import { loadState } from './engine/state';
-import { BackupDatabaseRunEntity } from './entities/backup-database-run.entity';
-import { BackupRunEntity } from './entities/backup-run.entity';
 import {
   collectBackupDiskUsage,
   type IBackupDiskUsage,
 } from './disk-stats.util';
+import { BackupRunnerService } from './engine/backup-runner.service';
+import { createRunId } from './engine/manifest';
+import { loadState } from './engine/state';
+import { BackupDatabaseRunEntity } from './entities/backup-database-run.entity';
+import { BackupRunEntity } from './entities/backup-run.entity';
+import { BackupCancelledError } from './errors/backup-cancelled.error';
+import { BackupEventsService } from './events/backup-events.service';
+import { type BackupRunProgressContext } from './progress/backup-run-progress.context';
 import {
   aggregateHistoryByDay,
   PUBLIC_OVERVIEW_RECENT_JOBS,
@@ -27,33 +30,32 @@ import {
   summarizeJobs,
   truncateError,
 } from './public-overview.util';
+import {
+  BackupQueueService,
+  type EnqueueBackupResult,
+} from './queue/backup-queue.service';
 import { SourceRegistry } from './source-registry';
-import type {
-  BackupMode,
-  BackupRunOptions,
-  BackupRunStatus,
-  BackupTrigger,
-  DatabaseRunResult,
-  RunManifest,
-  SourceGroup,
-  SourceReachability,
+import {
+  type BackupMode,
+  type BackupRunOptions,
+  type BackupRunStatus,
+  type BackupTrigger,
+  type DatabaseRunResult,
+  type RunManifest,
+  type SourceGroup,
+  type SourceReachability,
 } from './types';
 import {
   ARCHIVE_TARGET,
   type ArchiveTarget,
 } from './zones/archive-target.interface';
 import { PrimaryZoneService } from './zones/primary-zone.service';
-import { RetentionService } from './zones/retention.service';
 import { RestorePlanService } from './zones/restore-plan.service';
+import { RetentionService } from './zones/retention.service';
 
-export interface TriggerRunResult {
-  runId: string;
-  status: 'accepted';
-  message: string;
-  mode: BackupMode;
-}
+export type TriggerRunResult = EnqueueBackupResult;
 
-export type PublicOverviewDatabase = {
+export interface PublicOverviewDatabase {
   group: SourceGroup;
   database: string;
   host: string;
@@ -64,9 +66,9 @@ export type PublicOverviewDatabase = {
   lastRunStatus: BackupRunStatus | null;
   lastStartedAt: string | null;
   watermark: string | null;
-};
+}
 
-export type PublicOverviewResponse = {
+export interface PublicOverviewResponse {
   generatedAt: string;
   scheduleEnabled: boolean | null;
   freshness: {
@@ -97,6 +99,9 @@ export type PublicOverviewResponse = {
     trigger: BackupTrigger;
     startedAt: string;
     finishedAt: string | null;
+    queuedAt: string | null;
+    sourceGroups: string | null;
+    databasesFilter: string | null;
     error: string | null;
   }>;
   zones: {
@@ -107,12 +112,13 @@ export type PublicOverviewResponse = {
     freeHint: string | null;
   };
   disk: IBackupDiskUsage | null;
-};
+}
 
 @Injectable()
 export class BackupService {
   private readonly logger = new Logger(BackupService.name);
-  private inFlightRunId: string | null = null;
+
+  private readonly inFlightRunIds = new Set<string>();
 
   constructor(
     @Inject(BackupConfigService)
@@ -129,6 +135,11 @@ export class BackupService {
     private readonly restorePlan: RestorePlanService,
     @Inject(ARCHIVE_TARGET) private readonly archiveTarget: ArchiveTarget,
     @Optional()
+    private readonly backupEvents?: BackupEventsService,
+    @Optional()
+    @Inject(forwardRef(() => BackupQueueService))
+    private readonly backupQueue?: BackupQueueService,
+    @Optional()
     @InjectRepository(BackupRunEntity)
     private readonly runRepo?: Repository<BackupRunEntity>,
     @Optional()
@@ -136,63 +147,102 @@ export class BackupService {
     private readonly dbRunRepo?: Repository<BackupDatabaseRunEntity>,
   ) {}
 
-  /** HTTP trigger: returns immediately; work continues in background. */
-  triggerRun(options: BackupRunOptions): TriggerRunResult {
-    const mode = options.mode ?? 'incremental';
-    if (this.inFlightRunId) {
+  /** HTTP / cron: enqueue on BullMQ (status queued). */
+  async triggerRun(options: BackupRunOptions): Promise<TriggerRunResult> {
+    if (!this.backupQueue) {
       throw new ConflictException(
-        `A backup run is already in progress (${this.inFlightRunId})`,
+        'Backup queue is not available in this process',
       );
     }
 
-    const runId = createRunId();
-    this.inFlightRunId = runId;
-
-    void this.startBackground(options, runId).catch((error: unknown) => {
-      this.clearInFlight(runId);
-      this.logger.error(
-        `background backup failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
-
-    return {
-      runId,
-      status: 'accepted',
-      mode,
-      message: `Backup started in background (mode=${mode})`,
-    };
+    return this.backupQueue.enqueue(options);
   }
 
-  /** CLI / scheduler: wait for completion. */
-  async runOnceAndWait(options: BackupRunOptions): Promise<RunManifest> {
-    if (this.inFlightRunId) {
+  async cancelRun(runId: string): Promise<{ runId: string; status: string }> {
+    if (!this.backupQueue) {
       throw new ConflictException(
-        `A backup run is already in progress (${this.inFlightRunId})`,
+        'Backup queue is not available in this process',
       );
     }
 
+    return this.backupQueue.cancel(runId);
+  }
+
+  async getQueueSnapshot() {
+    if (!this.backupQueue) {
+      throw new ConflictException(
+        'Backup queue is not available in this process',
+      );
+    }
+
+    return this.backupQueue.getQueueSnapshot();
+  }
+
+  async cancelAllQueued() {
+    if (!this.backupQueue) {
+      throw new ConflictException(
+        'Backup queue is not available in this process',
+      );
+    }
+
+    return this.backupQueue.cancelAllQueued();
+  }
+
+  /**
+   * BullMQ worker entry: per-database locks inside runner, persist history.
+   */
+  async executeQueuedRun(
+    options: BackupRunOptions,
+    runId: string,
+    signal?: AbortSignal,
+    progressCtx?: BackupRunProgressContext,
+  ): Promise<RunManifest> {
     const settings = await this.backupConfig.getSettings();
     await this.primaryZone.ensureLayout();
 
-    const lock = acquireLock(settings.backupDir);
-    if (!lock) {
-      throw new ConflictException(
-        'Another backup process holds backup.lock; exiting without moving checkpoints',
-      );
-    }
-
-    const runId = createRunId();
-    this.inFlightRunId = runId;
+    this.inFlightRunIds.add(runId);
 
     try {
-      return await this.executeRun(options, lock, runId);
+      if (signal?.aborted) {
+        throw new BackupCancelledError(runId);
+      }
+
+      return await this.executeRun(options, runId, signal, progressCtx);
+    } catch (error) {
+      if (error instanceof BackupCancelledError) {
+        throw error;
+      }
+
+      await this.failRunHistory(
+        runId,
+        options,
+        settings.backupDir,
+        error instanceof Error ? error.message : String(error),
+      );
+
+      throw error;
     } finally {
-      this.inFlightRunId = null;
+      this.clearInFlight(runId);
+    }
+  }
+
+  /** CLI: wait for completion (bypasses Bull — uses per-database locks). */
+  async runOnceAndWait(options: BackupRunOptions): Promise<RunManifest> {
+    await this.primaryZone.ensureLayout();
+
+    const runId = createRunId();
+    this.inFlightRunIds.add(runId);
+
+    try {
+      return await this.executeRun(options, runId);
+    } finally {
+      this.clearInFlight(runId);
     }
   }
 
   async listSources() {
     let volumeDirs: { HIS: string; EMR: string; LIS: string } | null = null;
+
     try {
       volumeDirs = (await this.backupConfig.getSettings()).volumeDirs;
     } catch {
@@ -203,6 +253,7 @@ export class BackupService {
 
     return sources.map((source) => {
       const watermarks: Record<string, string | null> = {};
+
       if (volumeDirs) {
         const volumeDir =
           source.group === 'HIS'
@@ -210,6 +261,7 @@ export class BackupService {
             : source.group === 'LIS'
               ? volumeDirs.LIS
               : volumeDirs.EMR;
+
         for (const database of source.databases) {
           const profile =
             source.group === 'HIS'
@@ -219,6 +271,7 @@ export class BackupService {
                 : source.group === 'EMR'
                   ? 'envers'
                   : 'snapshot';
+
           try {
             watermarks[database] = loadState(
               volumeDir,
@@ -258,13 +311,27 @@ export class BackupService {
   }
 
   getInFlightRunId(): string | null {
-    return this.inFlightRunId;
+    const first = this.inFlightRunIds.values().next();
+
+    return first.done ? null : first.value;
   }
 
-  /** True when this process has an in-flight run or backup.lock is held. */
+  getInFlightRunIds(): string[] {
+    return [...this.inFlightRunIds];
+  }
+
+  /** True when this process has in-flight runs or BullMQ has active jobs. */
   async isBackupInProgress(): Promise<boolean> {
-    if (this.inFlightRunId) {
+    if (this.inFlightRunIds.size > 0) {
       return true;
+    }
+
+    if (this.backupQueue) {
+      try {
+        return (await this.backupQueue.getActiveJobCount()) > 0;
+      } catch {
+        // fall through
+      }
     }
 
     try {
@@ -294,6 +361,7 @@ export class BackupService {
         where: { runId },
         relations: ['databases'],
       });
+
       if (row) {
         return row;
       }
@@ -302,6 +370,7 @@ export class BackupService {
     const manifest = (await this.primaryZone.readManifest(
       runId,
     )) as RunManifest | null;
+
     if (!manifest) {
       throw new NotFoundException(`Run ${runId} not found`);
     }
@@ -316,8 +385,10 @@ export class BackupService {
     ageHours: number | null;
   }> {
     let maxAgeHours = 5;
+
     try {
-      maxAgeHours = (await this.backupConfig.getSettings()).freshnessMaxAgeHours;
+      maxAgeHours = (await this.backupConfig.getSettings())
+        .freshnessMaxAgeHours;
     } catch {
       // BACKUP_DIR may be unset on API-only hosts
     }
@@ -326,10 +397,12 @@ export class BackupService {
 
     try {
       const runIds = await this.primaryZone.listRunIds();
+
       for (const runId of [...runIds].reverse()) {
         const manifest = (await this.primaryZone.readManifest(
           runId,
         )) as RunManifest | null;
+
         if (!manifest?.finishedAt) {
           continue;
         }
@@ -380,6 +453,7 @@ export class BackupService {
     ]);
 
     let scheduleEnabled: boolean | null = null;
+
     try {
       scheduleEnabled = (await this.backupConfig.getSettings()).scheduleEnabled;
     } catch {
@@ -387,6 +461,7 @@ export class BackupService {
     }
 
     const databases: PublicOverviewDatabase[] = [];
+
     for (const source of sources) {
       for (const database of source.databases) {
         const latest = this.findLatestDbRun(runs, source.group, database);
@@ -446,6 +521,13 @@ export class BackupService {
             ? run.finishedAt.toISOString()
             : String(run.finishedAt)
           : null,
+        queuedAt: run.queuedAt
+          ? run.queuedAt instanceof Date
+            ? run.queuedAt.toISOString()
+            : String(run.queuedAt)
+          : null,
+        sourceGroups: run.sourceGroups ?? null,
+        databasesFilter: run.databasesFilter ?? null,
         error: truncateError(run.error),
       })),
       zones: {
@@ -487,9 +569,10 @@ export class BackupService {
     startedAt: string;
   } | null {
     for (const run of runs) {
-      const db = run.databases?.find(
+      const db = run.databases.find(
         (row) => row.database === database && row.sourceGroup === group,
       );
+
       if (!db) {
         continue;
       }
@@ -523,6 +606,7 @@ export class BackupService {
       .slice(0, limit);
 
     const entities: BackupRunEntity[] = [];
+
     for (const runId of runIds) {
       const manifest = (await this.primaryZone.readManifest(
         runId,
@@ -546,93 +630,57 @@ export class BackupService {
   }
 
   private clearInFlight(runId: string): void {
-    if (this.inFlightRunId === runId) {
-      this.inFlightRunId = null;
-    }
-  }
-
-  private async startBackground(
-    options: BackupRunOptions,
-    runId: string,
-  ): Promise<void> {
-    try {
-      const settings = await this.backupConfig.getSettings();
-      await this.primaryZone.ensureLayout();
-      const lock = acquireLock(settings.backupDir);
-      if (!lock) {
-        this.logger.error(
-          'background backup aborted: backup.lock held by another process',
-        );
-        this.clearInFlight(runId);
-
-        return;
-      }
-
-      try {
-        await this.executeRun(options, lock, runId);
-      } catch (error) {
-        await this.failRunHistory(
-          runId,
-          options,
-          settings.backupDir,
-          error instanceof Error ? error.message : String(error),
-        );
-        throw error;
-      } finally {
-        this.clearInFlight(runId);
-      }
-    } catch (error) {
-      this.clearInFlight(runId);
-      throw error;
-    }
+    this.inFlightRunIds.delete(runId);
   }
 
   private async executeRun(
     options: BackupRunOptions,
-    lock: { release: () => void },
     runId: string,
+    signal?: AbortSignal,
+    progressCtx?: BackupRunProgressContext,
   ): Promise<RunManifest> {
     const mode = options.mode ?? 'incremental';
-    try {
-      let sources = await this.sourceRegistry.getRunnableSources();
-      if (options.sourceGroups && options.sourceGroups.length > 0) {
-        const allowed = new Set(options.sourceGroups);
-        sources = sources.filter((s) => allowed.has(s.group));
-      }
+    let sources = await this.sourceRegistry.getRunnableSources();
 
-      if (options.databases && options.databases.length > 0) {
-        const allowedDb = new Set(options.databases);
-        sources = sources
-          .map((source) => ({
-            ...source,
-            databases: source.databases.filter((database) =>
-              allowedDb.has(database),
-            ),
-          }))
-          .filter((source) => source.databases.length > 0);
-      }
-
-      const config = await this.backupConfig.getBackupConfig(sources, mode);
-      await this.markRunRunning(runId, options, config.backupDir);
-      const manifest = await this.runner.run(config, runId);
-
-      const archive = await this.archiveTarget.publishRun(
-        manifest.runId,
-        await this.primaryZone.runDir(manifest.runId),
-      );
-
-      await this.persistHistory(manifest, options.trigger, archive.status);
-      await this.retention.applyRetention({
-        inFlightRunId: this.inFlightRunId,
-      });
-
-      return manifest;
-    } finally {
-      lock.release();
+    if (options.sourceGroups && options.sourceGroups.length > 0) {
+      const allowed = new Set(options.sourceGroups);
+      sources = sources.filter((s) => allowed.has(s.group));
     }
+
+    if (options.databases && options.databases.length > 0) {
+      const allowedDb = new Set(options.databases);
+      sources = sources
+        .map((source) => ({
+          ...source,
+          databases: source.databases.filter((database) =>
+            allowedDb.has(database),
+          ),
+        }))
+        .filter((source) => source.databases.length > 0);
+    }
+
+    const config = await this.backupConfig.getBackupConfig(sources, mode);
+    await this.markRunRunning(runId, options, config.backupDir);
+    const manifest = await this.runner.run(config, runId, signal, progressCtx);
+
+    if (signal?.aborted) {
+      throw new BackupCancelledError(runId);
+    }
+
+    const archive = await this.archiveTarget.publishRun(
+      manifest.runId,
+      await this.primaryZone.runDir(manifest.runId),
+    );
+
+    await this.persistHistory(manifest, options.trigger, archive.status);
+    await this.retention.applyRetention({
+      inFlightRunIds: this.getInFlightRunIds(),
+    });
+
+    return manifest;
   }
 
-  /** Insert a `running` row so FE history updates immediately after trigger. */
+  /** Transition queued → running (or insert running for CLI). */
   private async markRunRunning(
     runId: string,
     options: BackupRunOptions,
@@ -644,7 +692,21 @@ export class BackupService {
 
     try {
       const existing = await this.runRepo.findOne({ where: { runId } });
+
       if (existing) {
+        existing.status = 'running';
+        existing.startedAt = new Date();
+        existing.finishedAt = null;
+        existing.backupDir = backupDir || existing.backupDir;
+        existing.error = null;
+        await this.runRepo.save(existing);
+        this.backupEvents?.emitStatus({
+          runId,
+          status: 'running',
+          mode: existing.mode,
+          trigger: existing.trigger,
+        });
+
         return;
       }
 
@@ -659,8 +721,17 @@ export class BackupService {
           backupDir,
           error: null,
           archiveStatus: null,
+          sourceGroups: options.sourceGroups?.join(',') ?? null,
+          databasesFilter: options.databases?.join(',') ?? null,
+          queuedAt: null,
         }),
       );
+      this.backupEvents?.emitStatus({
+        runId,
+        status: 'running',
+        mode: options.mode ?? 'incremental',
+        trigger: options.trigger,
+      });
     } catch (error) {
       this.logger.warn(
         `Failed to mark run ${runId} as running: ${
@@ -682,7 +753,12 @@ export class BackupService {
 
     try {
       let row = await this.runRepo.findOne({ where: { runId } });
-      if (!row) {
+
+      if (row) {
+        row.status = 'error';
+        row.error = message;
+        row.finishedAt = new Date();
+      } else {
         row = this.runRepo.create({
           runId,
           startedAt: new Date(),
@@ -694,12 +770,21 @@ export class BackupService {
           error: message,
           archiveStatus: null,
         });
-      } else {
-        row.status = 'error';
-        row.error = message;
-        row.finishedAt = new Date();
       }
+
       await this.runRepo.save(row);
+      this.backupEvents?.emitStatus({
+        runId,
+        status: 'error',
+        mode: options.mode ?? 'incremental',
+        trigger: options.trigger,
+        error: message,
+      });
+      this.backupEvents?.emitLog({
+        runId,
+        level: 'error',
+        message,
+      });
     } catch (error) {
       this.logger.warn(
         `Failed to persist failed run ${runId}: ${
@@ -723,6 +808,10 @@ export class BackupService {
       let saved = await this.runRepo.findOne({
         where: { runId: manifest.runId },
       });
+
+      if (saved?.status === 'cancelled') {
+        return;
+      }
 
       if (saved) {
         saved.startedAt = new Date(manifest.startedAt);
@@ -756,11 +845,26 @@ export class BackupService {
       }
 
       const dbRows = manifest.databases.map((db) =>
-        this.dbRunRepo!.create(this.toDbRunEntity(db, saved!.id, manifest.runId)),
+        this.dbRunRepo!.create(
+          this.toDbRunEntity(db, saved.id, manifest.runId),
+        ),
       );
+
       if (dbRows.length > 0) {
         await this.dbRunRepo.save(dbRows);
       }
+
+      this.backupEvents?.emitStatus({
+        runId: manifest.runId,
+        status,
+        mode: manifest.mode ?? 'incremental',
+        trigger,
+      });
+      this.backupEvents?.emitLog({
+        runId: manifest.runId,
+        level: status === 'error' ? 'error' : 'info',
+        message: `Run finished with status=${status}`,
+      });
     } catch (error) {
       this.logger.warn(
         `Failed to persist backup history: ${

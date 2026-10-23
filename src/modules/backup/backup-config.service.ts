@@ -1,23 +1,28 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { forwardRef, Inject, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { SettingsService } from '../settings/settings.service';
 import {
   applyDevRowLimitPolicy,
+  type BackupVolumeDirs,
   isDevelopmentNodeEnv,
   resolveBackupPaths,
-  type BackupVolumeDirs,
   type ResolvedBackupPaths,
 } from './backup-paths';
 import {
   DEFAULT_INCREMENTAL_CRON,
   groupDatabasesByIncrementalCron,
-  incrementalCronSettingKey,
   type IncrementalCronBucket,
+  incrementalCronSettingKey,
   type IncrementalCronSources,
   type ScheduledDatabase,
 } from './incremental-schedule';
-import type { BackupConfig, BackupMode, SourceConfig, SourceGroup } from './types';
+import {
+  type BackupConfig,
+  type BackupMode,
+  type SourceConfig,
+  type SourceGroup,
+} from './types';
 
 export interface BackupModuleSettings {
   /** Meta volume (lock). Prefer volumeDirs for artifacts. */
@@ -50,7 +55,9 @@ export interface BackupModuleSettings {
 export class BackupConfigService {
   constructor(
     private readonly configService: ConfigService,
-    @Optional() private readonly settingsService?: SettingsService,
+    @Optional()
+    @Inject(forwardRef(() => SettingsService))
+    private readonly settingsService?: SettingsService,
   ) {}
 
   async getSettings(): Promise<BackupModuleSettings> {
@@ -76,7 +83,7 @@ export class BackupConfigService {
       chunkSize: BigInt(await this.optionalInt('BACKUP_CHUNK_SIZE', 1_000_000)),
       statementTimeoutMs: await this.optionalInt(
         'BACKUP_STATEMENT_TIMEOUT_MS',
-        0,
+        21_600_000,
       ),
       scheduleEnabled: await this.truthy('BACKUP_SCHEDULE_ENABLED'),
       scheduleCron: globalIncremental,
@@ -144,9 +151,10 @@ export class BackupConfigService {
       ),
       statementTimeoutMs:
         Number.parseInt(
-          this.configService.get<string>('BACKUP_STATEMENT_TIMEOUT_MS') ?? '0',
+          this.configService.get<string>('BACKUP_STATEMENT_TIMEOUT_MS') ??
+            '21600000',
           10,
-        ) || 0,
+        ) || 21_600_000,
       scheduleEnabled: ['1', 'true', 'yes', 'on'].includes(
         (
           this.configService.get<string>('BACKUP_SCHEDULE_ENABLED') ?? ''
@@ -226,8 +234,10 @@ export class BackupConfigService {
       (await this.read('BACKUP_LIS_INCREMENTAL_CRON')) ?? globalIncremental;
 
     const perDatabase: Record<string, string> = {};
+
     for (const entry of databases) {
       const raw = await this.read(incrementalCronSettingKey(entry.database));
+
       if (raw?.trim()) {
         perDatabase[entry.database] = raw.trim();
       }
@@ -250,6 +260,7 @@ export class BackupConfigService {
 
     for (const group of ['HIS', 'EMR', 'LIS'] as const) {
       const databases = this.splitCsv(await this.read(`${group}_DATABASES`));
+
       for (const database of databases) {
         result.push({ group, database });
       }
@@ -285,17 +296,20 @@ export class BackupConfigService {
     },
   ): Promise<SourceConfig | null> {
     const host = (await this.read(`${prefix}_HOST`))?.trim();
+
     if (!host) {
       return null;
     }
 
     const databases = this.splitCsv(await this.read(`${prefix}_DATABASES`));
+
     if (databases.length === 0) {
       return null;
     }
 
     const user = await this.read(`${prefix}_USER`);
     const password = await this.read(`${prefix}_PASSWORD`);
+
     if (!user || password === undefined || password === null) {
       return {
         group,
@@ -332,9 +346,9 @@ export class BackupConfigService {
       return this.settingsService.get(name);
     }
 
-    const raw = this.configService.get<string>(name);
+    const fromEnv = this.configService.get<string>(name);
 
-    return raw === null || raw === undefined || raw === '' ? undefined : raw;
+    return fromEnv === undefined || fromEnv === '' ? undefined : fromEnv;
   }
 
   private splitCsv(value: string | undefined): string[] {
@@ -350,11 +364,13 @@ export class BackupConfigService {
 
   private async optionalInt(name: string, fallback: number): Promise<number> {
     const raw = await this.read(name);
+
     if (!raw) {
       return fallback;
     }
 
     const n = Number.parseInt(raw, 10);
+
     if (!Number.isFinite(n) || n < 0) {
       throw new Error(`Setting ${name} must be a non-negative integer`);
     }
@@ -365,11 +381,13 @@ export class BackupConfigService {
   /** Like optionalInt but returns undefined when unset (for policy defaults). */
   private async readOptionalInt(name: string): Promise<number | undefined> {
     const raw = await this.read(name);
+
     if (raw === undefined || raw === null || raw === '') {
       return undefined;
     }
 
     const n = Number.parseInt(raw, 10);
+
     if (!Number.isFinite(n) || n < 0) {
       throw new Error(`Setting ${name} must be a non-negative integer`);
     }
@@ -379,6 +397,7 @@ export class BackupConfigService {
 
   private async truthy(name: string, defaultValue = false): Promise<boolean> {
     const raw = await this.read(name);
+
     if (raw === undefined || raw === null || raw === '') {
       return defaultValue;
     }

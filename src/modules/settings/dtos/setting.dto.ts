@@ -1,7 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsIn,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
 
-import type { SettingCategory } from '../settings.constants';
+import { type SettingCategory } from '../settings.constants';
 
 export class CreateSettingDto {
   @ApiProperty({ example: 'BACKUP_DIR' })

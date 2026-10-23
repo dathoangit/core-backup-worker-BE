@@ -4,7 +4,12 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from '@jest/globals';
 
-import { acquireLock } from './lock';
+import {
+  acquireLock,
+  clearStaleLock,
+  isLockHeldByPeer,
+  type LockPayload,
+} from './lock';
 import {
   beginOrResumePending,
   commitWatermark,
@@ -26,6 +31,7 @@ function makeTempDir(): string {
 afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
+
     if (dir) {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -35,12 +41,12 @@ afterEach(() => {
 describe('lock', () => {
   it('allows only one live holder', () => {
     const dir = makeTempDir();
-    const first = acquireLock(dir);
+    const first = acquireLock(dir, { runId: 'run-a' });
     expect(first).toBeTruthy();
-    const second = acquireLock(dir);
+    const second = acquireLock(dir, { runId: 'run-b' });
     expect(second).toBeNull();
     first!.release();
-    const third = acquireLock(dir);
+    const third = acquireLock(dir, { runId: 'run-c' });
     expect(third).toBeTruthy();
     third!.release();
   });
@@ -48,7 +54,39 @@ describe('lock', () => {
   it('replaces a stale lock from a dead pid', () => {
     const dir = makeTempDir();
     fs.writeFileSync(path.join(dir, 'backup.lock'), '999999999\n', 'utf8');
-    const lock = acquireLock(dir);
+    const lock = acquireLock(dir, { runId: 'run-stale' });
+    expect(lock).toBeTruthy();
+    lock!.release();
+  });
+
+  it('replaces legacy lock with same pid as this process (Docker PID1)', () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, 'backup.lock'), `${process.pid}\n`, 'utf8');
+    const lock = acquireLock(dir, { runId: 'run-docker' });
+    expect(lock).toBeTruthy();
+    lock!.release();
+  });
+
+  it('treats different ownerId as stale even when pid is alive', () => {
+    const foreign: LockPayload = {
+      ownerId: 'other-boot-uuid',
+      runId: 'run-old',
+      pid: process.pid,
+      createdAt: new Date().toISOString(),
+    };
+    expect(isLockHeldByPeer(foreign, 'this-boot-uuid')).toBe(false);
+
+    const dir = makeTempDir();
+    fs.writeFileSync(
+      path.join(dir, 'backup.lock'),
+      `${JSON.stringify(foreign)}\n`,
+      'utf8',
+    );
+    expect(clearStaleLock(dir, 'this-boot-uuid')).toBe(true);
+    const lock = acquireLock(dir, {
+      runId: 'run-new',
+      ownerId: 'this-boot-uuid',
+    });
     expect(lock).toBeTruthy();
     lock!.release();
   });

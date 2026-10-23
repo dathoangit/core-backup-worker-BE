@@ -8,7 +8,13 @@ export type SourceReachability = 'ready' | 'unreachable' | 'unconfigured';
 
 export type BackupTrigger = 'cron' | 'manual';
 
-export type BackupRunStatus = 'running' | 'ok' | 'partial' | 'error';
+export type BackupRunStatus =
+  | 'queued'
+  | 'running'
+  | 'ok'
+  | 'partial'
+  | 'error'
+  | 'cancelled';
 
 export interface SourceConfig {
   group: SourceGroup;
@@ -59,6 +65,8 @@ export interface ChunkResult {
   file: string;
   rowCount: number;
   bytes: number;
+  sha256?: string;
+  md5?: string;
   fromExclusive: string;
   toInclusive: string;
 }

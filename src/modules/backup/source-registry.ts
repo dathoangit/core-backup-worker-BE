@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { BackupConfigService } from './backup-config.service';
-import type { SourceConfig, SourceGroup } from './types';
+import { type SourceConfig } from './types';
 
 @Injectable()
 export class SourceRegistry {
@@ -17,11 +17,13 @@ export class SourceRegistry {
     const sources: SourceConfig[] = [];
 
     const his = await this.backupConfig.loadSource('HIS', 'HIS');
+
     if (his) {
       sources.push(his);
     }
 
     const emr = await this.backupConfig.loadSource('EMR', 'EMR');
+
     if (emr) {
       sources.push(emr);
     }
@@ -31,6 +33,7 @@ export class SourceRegistry {
       reason:
         'BADL secondary host not reachable yet (ECONNREFUSED). Kept in inventory only.',
     });
+
     if (badl) {
       sources.push(badl);
     }
@@ -38,11 +41,13 @@ export class SourceRegistry {
     const lis = await this.backupConfig.loadSource('LIS', 'LIS', {
       defaultPort: 1433,
     });
+
     if (lis) {
       sources.push(lis);
     }
 
     const pacs = await this.backupConfig.loadSource('PACS', 'PACS');
+
     if (pacs) {
       sources.push({
         ...pacs,

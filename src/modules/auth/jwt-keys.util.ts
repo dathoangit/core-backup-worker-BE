@@ -20,6 +20,7 @@ export function resolveJwtKey(
   }
 
   const pemPath = join(process.cwd(), pemFilename);
+
   if (existsSync(pemPath)) {
     return readFileSync(pemPath, 'utf8').trim();
   }

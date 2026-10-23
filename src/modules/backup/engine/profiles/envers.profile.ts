@@ -1,8 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { Client } from 'pg';
+import { type Client } from 'pg';
 
+import { BackupCancelledError } from '../../errors/backup-cancelled.error';
+import { type BackupProgressSink } from '../../progress/backup-progress.types';
+import {
+  type ChunkResult,
+  type DatabaseRunResult,
+  type DatabaseState,
+  type PendingState,
+  type SkippedTable,
+  type SourceConfig,
+} from '../../types';
 import {
   buildIdRange,
   chunkKey,
@@ -29,14 +39,6 @@ import {
   markChunkComplete,
   saveState,
 } from '../state';
-import type {
-  ChunkResult,
-  DatabaseRunResult,
-  DatabaseState,
-  PendingState,
-  SkippedTable,
-  SourceConfig,
-} from '../../types';
 
 const SCHEMA_BY_DATABASE: Record<string, string[]> = {
   signer: ['signer'],
@@ -56,6 +58,7 @@ async function persistPending(
 ): Promise<DatabaseState> {
   const next = { ...state, pending };
   saveState(backupDir, database, next);
+
   return next;
 }
 
@@ -69,8 +72,23 @@ async function snapshotAllTables(options: {
   /** When set, write under runs/<runId>/<db>/full instead of snapshots/. */
   runId?: string;
   rowLimit?: number;
-}): Promise<{ chunks: ChunkResult[]; state: DatabaseState; pending: PendingState }> {
-  const { client, backupDir, database, tables, runId, rowLimit } = options;
+  signal?: AbortSignal;
+  progress?: BackupProgressSink;
+}): Promise<{
+  chunks: ChunkResult[];
+  state: DatabaseState;
+  pending: PendingState;
+}> {
+  const {
+    client,
+    backupDir,
+    database,
+    tables,
+    runId,
+    rowLimit,
+    signal,
+    progress,
+  } = options;
   let { state, pending } = options;
   const chunks: ChunkResult[] = [];
   const outDir = runId
@@ -78,14 +96,24 @@ async function snapshotAllTables(options: {
     : path.join(backupDir, 'snapshots', database);
   fs.mkdirSync(outDir, { recursive: true });
   const keyPrefix = runId ? 'full' : 'snapshot';
+  let tablesDone = 0;
 
   for (const table of tables) {
+    if (signal?.aborted) {
+      throw new BackupCancelledError(runId ?? 'cli');
+    }
+
     const key = `${keyPrefix}:${table.schema}.${table.table}`;
+
     if (pending.completedChunkKeys.includes(key)) {
+      tablesDone += 1;
       continue;
     }
 
-    const outputPath = path.join(outDir, `${table.schema}.${table.table}.csv.gz`);
+    const outputPath = path.join(
+      outDir,
+      `${table.schema}.${table.table}.csv.gz`,
+    );
     const result = await copyFullTable({
       client,
       schema: table.schema,
@@ -98,11 +126,21 @@ async function snapshotAllTables(options: {
       file: outputPath,
       rowCount: result.rowCount,
       bytes: result.bytes,
+      sha256: result.sha256,
+      md5: result.md5,
       fromExclusive: '0',
       toInclusive: runId ? 'full' : 'snapshot',
     });
     pending = markChunkComplete(pending, key);
     state = await persistPending(backupDir, database, state, pending);
+    tablesDone += 1;
+    progress?.onTableProgress({
+      database,
+      table: `${table.schema}.${table.table}`,
+      tablesDone,
+      tablesTotal: tables.length,
+      rowsDelta: Math.max(result.rowCount, 0),
+    });
   }
 
   return { chunks, state, pending };
@@ -122,7 +160,11 @@ async function copyRevChunks(options: {
   state: DatabaseState;
   pending: PendingState;
   rowLimit?: number;
-}): Promise<{ chunks: ChunkResult[]; state: DatabaseState; pending: PendingState }> {
+}): Promise<{
+  chunks: ChunkResult[];
+  state: DatabaseState;
+  pending: PendingState;
+}> {
   const {
     client,
     backupDir,
@@ -140,12 +182,14 @@ async function copyRevChunks(options: {
   const chunks: ChunkResult[] = [];
   const outDir = path.join(backupDir, 'runs', runId, database, 'append');
   let ranges = splitIdRange({ fromExclusive, toInclusive }, chunkSize);
+
   if (rowLimit && rowLimit > 0) {
     ranges = ranges.slice(0, 1);
   }
 
   for (const range of ranges) {
     const key = chunkKey(schema, table, range.fromExclusive, range.toInclusive);
+
     if (pending.completedChunkKeys.includes(key)) {
       continue;
     }
@@ -208,11 +252,13 @@ async function exportEnversPatches(options: {
     const hasAud = baseTables.some(
       (t) => t.schema === table.schema && t.table === audTable,
     );
+
     if (!hasAud) {
       continue;
     }
 
     const hasId = await tableHasColumn(client, table.schema, table.table, 'id');
+
     if (!hasId) {
       continue;
     }
@@ -245,6 +291,8 @@ async function exportEnversPatches(options: {
         file,
         rowCount: result.rowCount,
         bytes: result.bytes,
+        sha256: result.sha256,
+        md5: result.md5,
         fromExclusive: fromExclusive.toString(),
         toInclusive: toInclusive.toString(),
       });
@@ -266,12 +314,15 @@ async function exportEnversPatches(options: {
       deletesFile,
       { rowLimit },
     );
+
     if (deletes.bytes > 20) {
       chunks.push({
         key: `envers.deletes.${table.schema}.${table.table}:${fromExclusive}:${toInclusive}`,
         file: deletesFile,
         rowCount: deletes.rowCount,
         bytes: deletes.bytes,
+        sha256: deletes.sha256,
+        md5: deletes.md5,
         fromExclusive: fromExclusive.toString(),
         toInclusive: toInclusive.toString(),
       });
@@ -279,6 +330,7 @@ async function exportEnversPatches(options: {
   }
 
   void schema;
+
   return chunks;
 }
 
@@ -291,6 +343,8 @@ export async function backupEnversDatabase(options: {
   chunkSize: bigint;
   mode?: 'incremental' | 'full';
   devRowLimit?: number;
+  signal?: AbortSignal;
+  progress?: BackupProgressSink;
 }): Promise<DatabaseRunResult> {
   const {
     client,
@@ -301,6 +355,8 @@ export async function backupEnversDatabase(options: {
     chunkSize,
     mode = 'incremental',
     devRowLimit = 0,
+    signal,
+    progress,
   } = options;
   const rowLimit = devRowLimit > 0 ? devRowLimit : undefined;
   const effectiveChunkSize =
@@ -314,15 +370,17 @@ export async function backupEnversDatabase(options: {
   const schemaCandidates = SCHEMA_BY_DATABASE[database] ?? [];
   const schemas = await findSchemas(client, [...schemaCandidates, 'public']);
   const dataSchemas = schemas.filter((s) => s !== 'public');
+
   if (dataSchemas.length === 0) {
     throw new Error(`${database}: no usable business schema`);
   }
 
   const { tables, skipped } = await listReadableTables(client, dataSchemas);
   skippedTables.push(...skipped);
-
   const schema = dataSchemas[0];
-  const hasRevinfo = tables.some((t) => t.schema === schema && t.table === 'revinfo');
+  const hasRevinfo = tables.some(
+    (t) => t.schema === schema && t.table === 'revinfo',
+  );
   const revCount = hasRevinfo
     ? await captureTipByOrder(client, schema, 'revinfo', 'rev')
     : 0n;
@@ -332,7 +390,7 @@ export async function backupEnversDatabase(options: {
     let state = loadState(backupDir, database, 'snapshot');
     const watermarkBefore = state.watermark;
     const captured = formatWatermark(BigInt(Date.now()));
-    let pending = beginOrResumePending(state, captured, runId);
+    const pending = beginOrResumePending(state, captured, runId);
     state = await persistPending(backupDir, database, state, pending);
 
     try {
@@ -346,6 +404,8 @@ export async function backupEnversDatabase(options: {
         // Weekly/full baseline also lands under runs/ so retention can see it.
         runId: forceFull ? pending.runId : undefined,
         rowLimit,
+        signal,
+        progress,
       });
       allChunks.push(...snap.chunks);
       state = commitWatermark(snap.state, captured);
@@ -364,6 +424,7 @@ export async function backupEnversDatabase(options: {
       };
     } catch (error) {
       saveState(backupDir, database, { ...state, pending });
+
       throw error;
     }
   }
@@ -392,6 +453,8 @@ export async function backupEnversDatabase(options: {
         pending,
         runId: pending.runId,
         rowLimit,
+        signal,
+        progress,
       });
       allChunks.push(...snap.chunks);
       state = snap.state;
@@ -424,7 +487,13 @@ export async function backupEnversDatabase(options: {
         pending = revinfo.pending;
 
         for (const table of tables.filter((t) => t.table.endsWith('_aud'))) {
-          const hasRev = await tableHasColumn(client, table.schema, table.table, 'rev');
+          const hasRev = await tableHasColumn(
+            client,
+            table.schema,
+            table.table,
+            'rev',
+          );
+
           if (!hasRev) {
             skippedTables.push({
               schema: table.schema,
@@ -487,6 +556,7 @@ export async function backupEnversDatabase(options: {
     };
   } catch (error) {
     saveState(backupDir, database, { ...state, pending });
+
     throw error;
   }
 }

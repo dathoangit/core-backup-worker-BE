@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   HttpCode,
@@ -8,15 +9,26 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { IsString, MinLength } from 'class-validator';
 
 import { Auth } from '../../decorators';
 import { BackupService } from './backup.service';
-import type { BackupMode, SourceGroup } from './types';
+import { BackupFilesService } from './files/backup-files.service';
+import { type BackupMode, type SourceGroup } from './types';
+
+class BackupFileChecksumDto {
+  @IsString()
+  @MinLength(1)
+  relativePath!: string;
+}
 
 @Controller('admin/backup')
 @ApiTags('admin/backup')
 export class BackupController {
-  constructor(private readonly backupService: BackupService) {}
+  constructor(
+    private readonly backupService: BackupService,
+    private readonly backupFiles: BackupFilesService,
+  ) {}
 
   @Post('runs')
   @HttpCode(HttpStatus.ACCEPTED)
@@ -26,8 +38,7 @@ export class BackupController {
     @Query('groups') groupsRaw?: string,
     @Query('databases') databasesRaw?: string,
   ) {
-    const mode: BackupMode =
-      modeRaw === 'full' ? 'full' : 'incremental';
+    const mode: BackupMode = modeRaw === 'full' ? 'full' : 'incremental';
     const sourceGroups = this.parseGroups(groupsRaw);
     const databases = this.parseDatabases(databasesRaw);
 
@@ -37,6 +48,26 @@ export class BackupController {
       sourceGroups,
       databases,
     });
+  }
+
+  @Post('runs/:runId/cancel')
+  @HttpCode(HttpStatus.OK)
+  @Auth()
+  cancelRun(@Param('runId') runId: string) {
+    return this.backupService.cancelRun(runId);
+  }
+
+  @Get('queue')
+  @Auth()
+  getQueue() {
+    return this.backupService.getQueueSnapshot();
+  }
+
+  @Post('queue/cancel-all-queued')
+  @HttpCode(HttpStatus.OK)
+  @Auth()
+  cancelAllQueued() {
+    return this.backupService.cancelAllQueued();
   }
 
   @Get('runs')
@@ -73,24 +104,38 @@ export class BackupController {
     return this.backupService.getRestorePlan(database);
   }
 
+  @Get('files/tree')
+  @Auth()
+  getFilesTree() {
+    return this.backupFiles.getTree();
+  }
+
+  @Get('files')
+  @Auth()
+  listFiles(
+    @Query('date') date?: string,
+    @Query('database') database?: string,
+  ) {
+    return this.backupFiles.listFiles({ date, database });
+  }
+
+  @Post('files/checksum')
+  @Auth()
+  @HttpCode(HttpStatus.OK)
+  computeChecksum(@Body() body: BackupFileChecksumDto) {
+    return this.backupFiles.computeChecksum(body.relativePath);
+  }
+
   private parseGroups(raw?: string): SourceGroup[] | undefined {
     if (!raw?.trim()) {
       return undefined;
     }
 
-    const allowed = new Set<SourceGroup>([
-      'HIS',
-      'EMR',
-      'BADL',
-      'LIS',
-      'PACS',
-    ]);
+    const allowed = new Set<SourceGroup>(['HIS', 'EMR', 'BADL', 'LIS', 'PACS']);
     const groups = raw
       .split(',')
       .map((part) => part.trim().toUpperCase())
-      .filter((part): part is SourceGroup =>
-        allowed.has(part as SourceGroup),
-      );
+      .filter((part): part is SourceGroup => allowed.has(part as SourceGroup));
 
     return groups.length > 0 ? groups : undefined;
   }

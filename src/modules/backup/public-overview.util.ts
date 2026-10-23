@@ -1,25 +1,25 @@
-import type { BackupRunStatus } from './types';
+import { type BackupRunStatus } from './types';
 
 export const PUBLIC_OVERVIEW_TZ = 'Asia/Ho_Chi_Minh';
 export const PUBLIC_OVERVIEW_HISTORY_DAYS = 14;
 export const PUBLIC_OVERVIEW_RECENT_JOBS = 12;
 export const PUBLIC_OVERVIEW_RUN_SAMPLE = 200;
 
-export type DayStatusCounts = {
+export interface DayStatusCounts {
   date: string;
   ok: number;
   error: number;
   partial: number;
   running: number;
-};
+}
 
-export type JobSummaryCounts = {
+export interface JobSummaryCounts {
   ok: number;
   error: number;
   partial: number;
   running: number;
   total: number;
-};
+}
 
 /** YYYY-MM-DD in Asia/Ho_Chi_Minh. */
 export function toVnDateKey(date: Date): string {
@@ -63,34 +63,43 @@ export function aggregateHistoryByDay(
 
   for (const run of runs) {
     const started =
-      run.startedAt instanceof Date
-        ? run.startedAt
-        : new Date(run.startedAt);
+      run.startedAt instanceof Date ? run.startedAt : new Date(run.startedAt);
+
     if (Number.isNaN(started.getTime())) {
       continue;
     }
 
     const key = toVnDateKey(started);
     const bucket = byDate.get(key);
+
     if (!bucket) {
       continue;
     }
 
     switch (run.status) {
-      case 'ok':
+      case 'ok': {
         bucket.ok += 1;
         break;
-      case 'error':
+      }
+
+      case 'error': {
         bucket.error += 1;
         break;
-      case 'partial':
+      }
+
+      case 'partial': {
         bucket.partial += 1;
         break;
-      case 'running':
+      }
+
+      case 'running': {
         bucket.running += 1;
         break;
-      default:
+      }
+
+      default: {
         break;
+      }
     }
   }
 
@@ -105,9 +114,8 @@ export function summarizeJobs(
   const cutoff = now.getTime() - windowMs;
   const inWindow = runs.filter((run) => {
     const started =
-      run.startedAt instanceof Date
-        ? run.startedAt
-        : new Date(run.startedAt);
+      run.startedAt instanceof Date ? run.startedAt : new Date(run.startedAt);
+
     return !Number.isNaN(started.getTime()) && started.getTime() >= cutoff;
   });
   const sample = inWindow.length > 0 ? inWindow : runs;
@@ -122,20 +130,29 @@ export function summarizeJobs(
 
   for (const run of sample) {
     switch (run.status) {
-      case 'ok':
+      case 'ok': {
         summary.ok += 1;
         break;
-      case 'error':
+      }
+
+      case 'error': {
         summary.error += 1;
         break;
-      case 'partial':
+      }
+
+      case 'partial': {
         summary.partial += 1;
         break;
-      case 'running':
+      }
+
+      case 'running': {
         summary.running += 1;
         break;
-      default:
+      }
+
+      default: {
         break;
+      }
     }
   }
 
@@ -149,9 +166,12 @@ export function truncateError(
   if (!error) {
     return null;
   }
+
   const trimmed = error.trim();
+
   if (trimmed.length <= maxLen) {
     return trimmed;
   }
+
   return `${trimmed.slice(0, maxLen - 1)}…`;
 }

@@ -55,7 +55,8 @@ USER node
 
 EXPOSE 3000
 
-# Liveness only: GET / is always 200. GET /health returns 503 when backup
+# Default CMD is the API process. Worker overrides with dist/worker.js in compose.
+# Liveness only: GET / is always 200. GET /api/v1/health returns 503 when backup
 # freshness is stale, so it must not drive container restarts.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD wget -qO- http://127.0.0.1:3000/ >/dev/null || exit 1

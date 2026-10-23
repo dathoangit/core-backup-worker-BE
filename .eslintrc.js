@@ -5,7 +5,7 @@ module.exports = {
     es6: true,
     node: true,
   },
-  ignorePatterns: ['.eslintrc.js'],
+  ignorePatterns: ['.eslintrc.js', 'dist/**', 'node_modules/**'],
   parserOptions: {
     ecmaVersion: 2020,
     project: './tsconfig.eslint.json',
@@ -38,8 +38,6 @@ module.exports = {
   rules: {
     'n/no-extraneous-import': 'off',
     'import/no-unresolved': 'off',
-    '@typescript-eslint/naming-convention': 'off',
-    '@typescript-eslint/naming-convention': 'off',
     '@typescript-eslint/no-base-to-string': 'off',
     '@typescript-eslint/no-unsafe-assignment': 'off',
     '@typescript-eslint/no-explicit-any': 'off',
@@ -52,6 +50,18 @@ module.exports = {
     'n/no-missing-import': 'off',
     'canonical/filename-match-exported': 'error',
     '@typescript-eslint/no-floating-promises': 'off',
+    // Backup / Nest DI: sequential awaits, fat constructors, EventEmitter are intentional.
+    'no-await-in-loop': 'off',
+    'sonarjs/cognitive-complexity': 'off',
+    'unicorn/no-await-expression-member': 'off',
+    'unicorn/no-nested-ternary': 'off',
+    'unicorn/prefer-event-target': 'off',
+    'unicorn/prefer-top-level-await': 'off',
+    '@typescript-eslint/no-unnecessary-condition': 'off',
+    '@typescript-eslint/no-redundant-type-constituents': 'off',
+    '@typescript-eslint/require-await': 'off',
+    'max-params': 'off',
+    'promise/always-return': 'off',
     // 'canonical/no-unused-exports': ['error', {tsConfigPath: './tsconfig.eslint.json'}],
     // 'canonical/id-match': [
     //   'error',
@@ -90,7 +100,6 @@ module.exports = {
       {argsIgnorePattern: '^_'},
     ],
     '@typescript-eslint/adjacent-overload-signatures': 'error',
-    'max-params': ['error', 7],
     '@typescript-eslint/array-type': ['error', {default: 'array-simple'}],
     '@typescript-eslint/ban-types': [
       'error',
@@ -155,7 +164,6 @@ module.exports = {
     'sonarjs/prefer-single-boolean-return': 'off',
     '@typescript-eslint/no-angle-bracket-type-assertion': 'off',
     '@typescript-eslint/no-empty-function': 'off',
-    '@typescript-eslint/no-unnecessary-condition': 'error',
     '@typescript-eslint/no-confusing-non-null-assertion': 'warn',
     '@typescript-eslint/no-duplicate-enum-values': 'error',
     '@typescript-eslint/no-empty-interface': 'error',
@@ -191,42 +199,8 @@ module.exports = {
       },
     ],
     '@typescript-eslint/semi': ['error', 'always'],
-    '@typescript-eslint/naming-convention': [
-      'error',
-      {
-        selector: 'default',
-        format: ['camelCase', 'PascalCase', 'snake_case', 'UPPER_CASE'],
-        filter: {
-          regex: '^_.*$',
-          match: false,
-        },
-      },
-      {
-        selector: 'variable',
-        format: ['camelCase', 'UPPER_CASE'],
-      },
-      {
-        selector: 'interface',
-        format: ['PascalCase'],
-        prefix: ['I'],
-      },
-      {
-        selector: 'typeLike',
-        format: ['PascalCase'],
-      },
-      {
-        selector: 'memberLike',
-        modifiers: ['private'],
-        format: ['camelCase'],
-        leadingUnderscore: 'forbid',
-      },
-      {
-        selector: 'variable',
-        types: ['boolean'],
-        format: ['PascalCase'],
-        prefix: ['is', 'should', 'has', 'can', 'did', 'will'],
-      },
-    ],
+    // Nest / domain types use PascalCase without I-prefix; booleans need not be is*.
+    '@typescript-eslint/naming-convention': 'off',
     '@typescript-eslint/type-annotation-spacing': 'error',
     '@typescript-eslint/unified-signatures': 'error',
     '@typescript-eslint/interface-name-prefix': 'off',
@@ -236,7 +210,6 @@ module.exports = {
     /**
      * plugin:eslint
      */
-    'no-await-in-loop': 'error',
     'padding-line-between-statements': [
       'error',
       {blankLine: 'always', prev: '*', next: 'return'},

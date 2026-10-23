@@ -5,7 +5,13 @@ import {
 } from '../backup/incremental-schedule';
 import { type SourceGroup } from '../backup/types';
 
-export type SettingCategory = 'backup' | 'his' | 'emr' | 'badl' | 'lis';
+export type SettingCategory =
+  | 'backup'
+  | 'his'
+  | 'emr'
+  | 'badl'
+  | 'lis'
+  | 'alerts';
 
 export interface SettingKeyDef {
   key: string;
@@ -18,12 +24,15 @@ function categoryForGroup(group: SourceGroup): SettingCategory {
     case 'HIS': {
       return 'his';
     }
+
     case 'EMR': {
       return 'emr';
     }
+
     case 'LIS': {
       return 'lis';
     }
+
     default: {
       return 'backup';
     }
@@ -53,7 +62,11 @@ export const SETTING_KEY_DEFS: SettingKeyDef[] = [
   { key: 'BACKUP_TIMEZONE', category: 'backup', isSecret: false },
   { key: 'BACKUP_HISTORY_ENABLED', category: 'backup', isSecret: false },
   { key: 'BACKUP_RETENTION_DAYS', category: 'backup', isSecret: false },
-  { key: 'BACKUP_FRESHNESS_MAX_AGE_HOURS', category: 'backup', isSecret: false },
+  {
+    key: 'BACKUP_FRESHNESS_MAX_AGE_HOURS',
+    category: 'backup',
+    isSecret: false,
+  },
   { key: 'BACKUP_ARCHIVE_TARGET', category: 'backup', isSecret: false },
   { key: 'BACKUP_CHUNK_SIZE', category: 'backup', isSecret: false },
   { key: 'BACKUP_STATEMENT_TIMEOUT_MS', category: 'backup', isSecret: false },
@@ -89,16 +102,32 @@ export const SETTING_KEY_DEFS: SettingKeyDef[] = [
   { key: 'BADL_USER', category: 'badl', isSecret: false },
   { key: 'BADL_PASSWORD', category: 'badl', isSecret: true },
   { key: 'BADL_DATABASES', category: 'badl', isSecret: false },
+  // alerts
+  { key: 'ALERT_TELEGRAM_ENABLED', category: 'alerts', isSecret: false },
+  { key: 'ALERT_TELEGRAM_BOT_TOKEN', category: 'alerts', isSecret: true },
+  { key: 'ALERT_TELEGRAM_CHAT_ID', category: 'alerts', isSecret: false },
+  { key: 'ALERT_EMAIL_ENABLED', category: 'alerts', isSecret: false },
+  { key: 'ALERT_SMTP_HOST', category: 'alerts', isSecret: false },
+  { key: 'ALERT_SMTP_PORT', category: 'alerts', isSecret: false },
+  { key: 'ALERT_SMTP_SECURE', category: 'alerts', isSecret: false },
+  { key: 'ALERT_SMTP_USER', category: 'alerts', isSecret: false },
+  { key: 'ALERT_SMTP_PASSWORD', category: 'alerts', isSecret: true },
+  { key: 'ALERT_EMAIL_FROM', category: 'alerts', isSecret: false },
+  { key: 'ALERT_EMAIL_TO', category: 'alerts', isSecret: false },
+  {
+    key: 'ALERT_DISK_FREE_THRESHOLD_PERCENT',
+    category: 'alerts',
+    isSecret: false,
+  },
   ...PER_DB_INCREMENTAL_CRON_DEFS,
 ];
 
 export const SETTING_KEY_SET = new Set(SETTING_KEY_DEFS.map((d) => d.key));
 
 /**
- * Cron / timezone keys are read by the scheduler at process boot.
- * Changing them requires a backend restart — only allow while no backup is running.
+ * Cron / timezone keys — hot-reloaded via ScheduleRegistry (no process restart).
  */
-export const RESTART_REQUIRED_SETTING_KEYS = new Set<string>([
+export const CRON_HOT_RELOAD_SETTING_KEYS = new Set<string>([
   'BACKUP_INCREMENTAL_CRON',
   'BACKUP_SCHEDULE_CRON',
   'BACKUP_HIS_INCREMENTAL_CRON',
@@ -110,6 +139,9 @@ export const RESTART_REQUIRED_SETTING_KEYS = new Set<string>([
   'BACKUP_TIMEZONE',
   ...PER_DB_INCREMENTAL_CRON_DEFS.map((d) => d.key),
 ]);
+
+/** @deprecated Use CRON_HOT_RELOAD_SETTING_KEYS */
+export const RESTART_REQUIRED_SETTING_KEYS = CRON_HOT_RELOAD_SETTING_KEYS;
 
 export function getSettingDef(key: string): SettingKeyDef | undefined {
   return SETTING_KEY_DEFS.find((d) => d.key === key);
@@ -124,10 +156,15 @@ export function isAllowlistedSettingKey(key: string): boolean {
   return isPerDatabaseIncrementalCronKey(key);
 }
 
-export function isRestartRequiredSettingKey(key: string): boolean {
-  if (RESTART_REQUIRED_SETTING_KEYS.has(key)) {
+export function isCronHotReloadSettingKey(key: string): boolean {
+  if (CRON_HOT_RELOAD_SETTING_KEYS.has(key)) {
     return true;
   }
 
   return isPerDatabaseIncrementalCronKey(key);
+}
+
+/** @deprecated Use isCronHotReloadSettingKey */
+export function isRestartRequiredSettingKey(key: string): boolean {
+  return isCronHotReloadSettingKey(key);
 }

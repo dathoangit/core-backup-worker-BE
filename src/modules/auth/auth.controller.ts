@@ -6,23 +6,28 @@ import {
   HttpStatus,
   Post,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import { type Request } from 'express';
+import { type Request, type Response } from 'express';
 
 import { Auth, AuthUser, PublicRoute } from '../../decorators';
 import { UserDto } from '../user/dtos/user.dto';
 import { UserEntity } from '../user/user.entity';
 import { AuthService } from './auth.service';
+import {
+  clearAccessTokenCookie,
+  setAccessTokenCookie,
+} from './auth-cookie.util';
 import { AuthTokenDto } from './dtos/auth-token.dto';
 import { ForgotPasswordDto } from './dtos/forgot-password.dto';
 import { ForgotPasswordResponseDto } from './dtos/forgot-password-response.dto';
 import { LoginDto } from './dtos/login.dto';
-import { RequestEmailVerificationDto } from './dtos/request-email-verification.dto';
 import { RegisterDto } from './dtos/register.dto';
+import { RequestEmailVerificationDto } from './dtos/request-email-verification.dto';
 import { ResetPasswordDto } from './dtos/reset-password.dto';
 import { UpdateEmailDto } from './dtos/update-email.dto';
 import { VerifyEmailDto } from './dtos/verify-email.dto';
@@ -45,8 +50,29 @@ export class AuthController {
   @PublicRoute(true)
   @Throttle({ default: { ttl: 60_000, limit: 10 } })
   @ApiOkResponse({ type: AuthTokenDto })
-  login(@Body() dto: LoginDto): Promise<AuthTokenDto> {
-    return this.authService.login(dto);
+  async login(
+    @Body() dto: LoginDto,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<AuthTokenDto> {
+    const result = await this.authService.login(dto);
+    setAccessTokenCookie(
+      response,
+      result.token.accessToken,
+      result.token.expiresIn,
+    );
+
+    return result;
+  }
+
+  @Post('logout')
+  @Auth()
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async logout(
+    @AuthUser() user: UserEntity,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<void> {
+    await this.authService.logout(user);
+    clearAccessTokenCookie(response);
   }
 
   @Post('forgot-password')
@@ -114,7 +140,7 @@ export class AuthController {
   @PublicRoute(true)
   @UseGuards(AuthGuard('google'))
   @ApiOkResponse({ type: AuthTokenDto })
-  googleCallback(
+  async googleCallback(
     @Req()
     request: Request & {
       user: {
@@ -124,7 +150,15 @@ export class AuthController {
         profile: Record<string, unknown>;
       };
     },
+    @Res({ passthrough: true }) response: Response,
   ): Promise<AuthTokenDto> {
-    return this.authService.loginWithGoogleProfile(request.user);
+    const result = await this.authService.loginWithGoogleProfile(request.user);
+    setAccessTokenCookie(
+      response,
+      result.token.accessToken,
+      result.token.expiresIn,
+    );
+
+    return result;
   }
 }

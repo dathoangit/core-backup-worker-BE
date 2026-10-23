@@ -2,12 +2,23 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Client } from 'pg';
 
 import { volumeDirForGroup } from '../backup-paths';
+import { BackupCancelledError } from '../errors/backup-cancelled.error';
+import {
+  type BackupRunProgressContext,
+  progressSink,
+} from '../progress/backup-run-progress.context';
+import { BackupCancelRegistry } from '../queue/backup-cancel.registry';
 import {
   type BackupConfig,
   type DatabaseRunResult,
   type RunManifest,
   type SourceConfig,
 } from '../types';
+import {
+  acquireDatabaseLock,
+  databaseLockFileName,
+  readLockPayload,
+} from './lock';
 import {
   createRunId,
   ensureRunDir,
@@ -22,9 +33,17 @@ import { backupMssqlSnapshot } from './profiles/mssql-snapshot.profile';
 export class BackupRunnerService {
   private readonly logger = new Logger(BackupRunnerService.name);
 
-  async run(config: BackupConfig, runId = createRunId()): Promise<RunManifest> {
+  constructor(private readonly cancelRegistry: BackupCancelRegistry) {}
+
+  async run(
+    config: BackupConfig,
+    runId = createRunId(),
+    signal?: AbortSignal,
+    progressCtx?: BackupRunProgressContext,
+  ): Promise<RunManifest> {
     const mode = config.mode ?? 'incremental';
     const manifestRoots = new Set<string>([config.backupDir]);
+    const sink = progressSink(progressCtx);
 
     for (const source of config.sources) {
       if (source.databases.length === 0) {
@@ -38,6 +57,22 @@ export class BackupRunnerService {
       ensureRunDir(root, runId);
     }
 
+    const workItems: Array<{ source: SourceConfig; database: string }> = [];
+
+    for (const source of config.sources) {
+      for (const database of source.databases) {
+        workItems.push({ source, database });
+      }
+    }
+
+    if (progressCtx) {
+      progressCtx.progress.setDbCount(runId, Math.max(workItems.length, 1));
+    }
+
+    if (workItems.length === 0) {
+      this.logger.warn(`run=${runId} mode=${mode} nothing to back up`);
+    }
+
     let manifest: RunManifest = {
       runId,
       startedAt: new Date().toISOString(),
@@ -47,22 +82,73 @@ export class BackupRunnerService {
     };
     this.writeManifests(manifestRoots, manifest);
 
-    for (const source of config.sources) {
-      for (const database of source.databases) {
-        const volumeDir = volumeDirForGroup(config.volumeDirs, source.group);
-        this.logger.log(
-          `starting ${
-            source.group
-          }/${database} mode=${mode} volume=${volumeDir}${
-            config.devRowLimit > 0 ? ` devRowLimit=${config.devRowLimit}` : ''
-          }`,
+    for (const [dbIndex, item] of workItems.entries()) {
+      const { source, database } = item;
+
+      if (signal?.aborted) {
+        throw new BackupCancelledError(runId);
+      }
+
+      if (progressCtx) {
+        progressCtx.progress.setDbIndex(runId, dbIndex, database);
+      }
+
+      const volumeDir = volumeDirForGroup(config.volumeDirs, source.group);
+      const lock = acquireDatabaseLock(config.backupDir, database, runId);
+
+      if (!lock) {
+        const holder = readLockPayload(
+          config.backupDir,
+          databaseLockFileName(database),
         );
+        const holderRun = holder?.runId || 'unknown';
+        const skipped: DatabaseRunResult = {
+          database,
+          group: source.group,
+          profile:
+            source.group === 'HIS'
+              ? 'adempiere'
+              : source.group === 'LIS'
+                ? 'snapshot'
+                : 'envers',
+          status: 'skipped',
+          watermarkBefore: null,
+          captured: null,
+          watermarkAfter: null,
+          chunks: [],
+          skippedTables: [],
+          error: `locked by run ${holderRun}`,
+        };
+        this.logger.warn(
+          `run=${runId} skip ${source.group}/${database}: locked by run ${holderRun}`,
+        );
+        sink?.onLog(
+          `${database}: skipped — locked by run ${holderRun}`,
+          'warn',
+        );
+        manifest = upsertDatabaseResult(manifest, skipped);
+        this.writeManifests(manifestRoots, manifest);
+        continue;
+      }
+
+      this.logger.log(
+        `run=${runId} starting ${
+          source.group
+        }/${database} mode=${mode} volume=${volumeDir}${
+          config.devRowLimit > 0 ? ` devRowLimit=${config.devRowLimit}` : ''
+        }`,
+      );
+      sink?.onLog(`starting ${source.group}/${database} mode=${mode}`);
+
+      try {
         const result = await this.backupOneDatabase({
           source,
           database,
           config,
           runId,
           volumeDir,
+          signal,
+          progressCtx,
         });
         manifest = upsertDatabaseResult(manifest, result);
         this.writeManifests(manifestRoots, manifest);
@@ -71,14 +157,33 @@ export class BackupRunnerService {
           const emptyCount = result.emptyTables?.length ?? 0;
           const emptyNote = emptyCount > 0 ? ` emptyTables=${emptyCount}` : '';
           this.logger.log(
-            `ok ${database} watermark ${result.watermarkBefore ?? 'null'} -> ${result.watermarkAfter}${emptyNote}`,
+            `run=${runId} ok ${database} watermark ${
+              result.watermarkBefore ?? 'null'
+            } -> ${result.watermarkAfter}${emptyNote}`,
+          );
+          sink?.onLog(
+            `ok ${database} watermark ${result.watermarkBefore ?? 'null'} -> ${
+              result.watermarkAfter
+            }`,
           );
         } else {
           this.logger.error(
+            `run=${runId} ${result.status} ${database}: ${
+              result.error ?? 'unknown'
+            }`,
+          );
+          sink?.onLog(
             `${result.status} ${database}: ${result.error ?? 'unknown'}`,
+            result.status === 'error' ? 'error' : 'warn',
           );
         }
+      } finally {
+        lock.release();
       }
+    }
+
+    if (signal?.aborted) {
+      throw new BackupCancelledError(runId);
     }
 
     manifest = {
@@ -86,6 +191,18 @@ export class BackupRunnerService {
       finishedAt: new Date().toISOString(),
     };
     this.writeManifests(manifestRoots, manifest);
+    const okCount = manifest.databases.filter(
+      (row) => row.status === 'ok',
+    ).length;
+    const errorCount = manifest.databases.filter(
+      (row) => row.status === 'error',
+    ).length;
+    const skippedCount = manifest.databases.filter(
+      (row) => row.status === 'skipped',
+    ).length;
+    this.logger.log(
+      `run=${runId} finished mode=${mode} ok=${okCount} error=${errorCount} skipped=${skippedCount}`,
+    );
 
     return manifest;
   }
@@ -100,7 +217,8 @@ export class BackupRunnerService {
     source: SourceConfig,
     database: string,
     statementTimeoutMs: number,
-  ): Promise<Client> {
+    runId: string,
+  ): Promise<{ client: Client; unregisterKiller: () => void }> {
     const client = new Client({
       host: source.host,
       port: source.port,
@@ -117,7 +235,48 @@ export class BackupRunnerService {
       await client.query(`SET statement_timeout = ${statementTimeoutMs}`);
     }
 
-    return client;
+    const backendPid = client.processID;
+    const unregisterKiller = this.cancelRegistry.registerKiller(
+      runId,
+      async () => {
+        if (!backendPid) {
+          return;
+        }
+
+        const killer = new Client({
+          host: source.host,
+          port: source.port,
+          user: source.user,
+          password: source.password,
+          database,
+          connectionTimeoutMillis: 10_000,
+        });
+
+        try {
+          await killer.connect();
+          await killer.query('SELECT pg_cancel_backend($1)', [backendPid]);
+          await new Promise((resolve) => {
+            setTimeout(resolve, 10_000);
+          });
+          const still = await killer.query(
+            `SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND state <> 'idle'`,
+            [backendPid],
+          );
+
+          if ((still.rowCount ?? 0) > 0) {
+            await killer.query('SELECT pg_terminate_backend($1)', [backendPid]);
+          }
+        } finally {
+          try {
+            await killer.end();
+          } catch {
+            // ignore
+          }
+        }
+      },
+    );
+
+    return { client, unregisterKiller };
   }
 
   private async backupOneDatabase(options: {
@@ -126,11 +285,16 @@ export class BackupRunnerService {
     config: BackupConfig;
     runId: string;
     volumeDir: string;
+    signal?: AbortSignal;
+    progressCtx?: BackupRunProgressContext;
   }): Promise<DatabaseRunResult> {
-    const { source, database, config, runId, volumeDir } = options;
+    const { source, database, config, runId, volumeDir, signal, progressCtx } =
+      options;
     const mode = config.mode ?? 'incremental';
+    const sink = progressSink(progressCtx);
 
     let client: Client | null = null;
+    let unregisterKiller: (() => void) | null = null;
 
     try {
       if (source.group === 'LIS') {
@@ -141,14 +305,21 @@ export class BackupRunnerService {
           runId,
           devRowLimit: config.devRowLimit,
           statementTimeoutMs: config.statementTimeoutMs,
+          chunkSize: Number(config.chunkSize),
+          signal,
+          progress: sink,
+          cancelRegistry: this.cancelRegistry,
         });
       }
 
-      client = await this.connectSource(
+      const connected = await this.connectSource(
         source,
         database,
         config.statementTimeoutMs,
+        runId,
       );
+      client = connected.client;
+      unregisterKiller = connected.unregisterKiller;
 
       if (source.group === 'HIS' && database === 'produce') {
         return await backupAdempiereDatabase({
@@ -160,6 +331,8 @@ export class BackupRunnerService {
           chunkSize: config.chunkSize,
           mode,
           devRowLimit: config.devRowLimit,
+          signal,
+          progress: sink,
         });
       }
 
@@ -173,6 +346,8 @@ export class BackupRunnerService {
           chunkSize: config.chunkSize,
           mode,
           devRowLimit: config.devRowLimit,
+          signal,
+          progress: sink,
         });
       }
 
@@ -189,6 +364,14 @@ export class BackupRunnerService {
         error: `No profile for ${source.group}/${database}`,
       };
     } catch (error) {
+      if (
+        signal?.aborted ||
+        (error instanceof Error &&
+          /cancel|abort|terminat|query_canceled|57014/i.test(error.message))
+      ) {
+        throw new BackupCancelledError(runId);
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       let profile: DatabaseRunResult['profile'] = 'snapshot';
 
@@ -211,6 +394,8 @@ export class BackupRunnerService {
         error: message,
       };
     } finally {
+      unregisterKiller?.();
+
       if (client) {
         try {
           await client.end();

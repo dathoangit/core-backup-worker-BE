@@ -1,4 +1,4 @@
-import type { SourceGroup } from './types';
+import { type SourceGroup } from './types';
 
 export const DEFAULT_INCREMENTAL_CRON = '0 */4 * * *';
 
@@ -7,8 +7,7 @@ export function incrementalCronSettingKey(database: string): string {
   return `BACKUP_INCREMENTAL_CRON_${database}`;
 }
 
-const PER_DB_CRON_KEY =
-  /^BACKUP_INCREMENTAL_CRON_([A-Za-z][A-Za-z0-9_]*)$/;
+const PER_DB_CRON_KEY = /^BACKUP_INCREMENTAL_CRON_([A-Za-z]\w*)$/;
 
 /** True when key is BACKUP_INCREMENTAL_CRON_<database> (not the global key). */
 export function isPerDatabaseIncrementalCronKey(key: string): boolean {
@@ -21,12 +20,12 @@ export function databaseFromIncrementalCronKey(key: string): string | null {
   return match?.[1] ?? null;
 }
 
-export type ScheduledDatabase = {
+export interface ScheduledDatabase {
   group: SourceGroup;
   database: string;
-};
+}
 
-export type IncrementalCronSources = {
+export interface IncrementalCronSources {
   /** Global fallback (BACKUP_INCREMENTAL_CRON / BACKUP_SCHEDULE_CRON). */
   globalCron: string;
   hisGroupCron?: string;
@@ -34,14 +33,15 @@ export type IncrementalCronSources = {
   lisGroupCron?: string;
   /** Per-database overrides keyed by database name. */
   perDatabase: Record<string, string>;
-};
+}
 
 export function resolveIncrementalCron(
   database: string,
   group: SourceGroup,
   sources: IncrementalCronSources,
 ): string {
-  const perDb = sources.perDatabase[database]?.trim();
+  const perDb = sources.perDatabase[database].trim();
+
   if (perDb) {
     return perDb;
   }
@@ -61,10 +61,10 @@ export function resolveIncrementalCron(
   return sources.globalCron.trim() || DEFAULT_INCREMENTAL_CRON;
 }
 
-export type IncrementalCronBucket = {
+export interface IncrementalCronBucket {
   cron: string;
   databases: ScheduledDatabase[];
-};
+}
 
 /** Group databases that share the same resolved cron into one scheduled job. */
 export function groupDatabasesByIncrementalCron(

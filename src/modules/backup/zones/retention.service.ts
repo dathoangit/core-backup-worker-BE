@@ -18,8 +18,10 @@ export class RetentionService {
 
   async applyRetention(options?: {
     inFlightRunId?: string | null;
+    inFlightRunIds?: string[] | null;
   }): Promise<{ deleted: string[]; skipped: string }> {
     const settings = await this.backupConfig.getSettings();
+
     if (settings.retentionDays <= 0) {
       return {
         deleted: [],
@@ -34,15 +36,18 @@ export class RetentionService {
       ? runIds.indexOf(newestBaseline)
       : runIds.length;
     const deleted: string[] = [];
+    const inFlight = new Set<string>([
+      ...(options?.inFlightRunIds ?? []),
+      ...(options?.inFlightRunId ? [options.inFlightRunId] : []),
+    ]);
 
     const volumeRootsForRun = [
       settings.backupDir,
       ...volumeRoots(settings.volumeDirs),
     ];
 
-    for (let i = 0; i < runIds.length; i++) {
-      const runId = runIds[i];
-      if (options?.inFlightRunId && runId === options.inFlightRunId) {
+    for (const [i, runId] of runIds.entries()) {
+      if (inFlight.has(runId)) {
         continue;
       }
 
@@ -55,6 +60,7 @@ export class RetentionService {
       }
 
       const mtime = this.newestRunMtime(volumeRootsForRun, runId);
+
       if (mtime === 0 || mtime >= cutoff) {
         continue;
       }
@@ -75,6 +81,7 @@ export class RetentionService {
 
     for (let i = runIds.length - 1; i >= 0; i--) {
       const runId = runIds[i];
+
       for (const root of volumeRootsForBaseline) {
         if (this.hasFullDump(path.join(root, 'runs', runId))) {
           return runId;
@@ -85,12 +92,15 @@ export class RetentionService {
     return null;
   }
 
-  private newestRunMtime(volumeRoots: string[], runId: string): number {
+  private newestRunMtime(roots: string[], runId: string): number {
     let newest = 0;
-    for (const root of volumeRoots) {
+
+    for (const root of roots) {
       const runDir = path.join(root, 'runs', runId);
+
       try {
         const mtime = fs.statSync(runDir).mtimeMs;
+
         if (mtime > newest) {
           newest = mtime;
         }
@@ -102,9 +112,10 @@ export class RetentionService {
     return newest;
   }
 
-  private deleteRunEverywhere(volumeRoots: string[], runId: string): void {
-    for (const root of volumeRoots) {
+  private deleteRunEverywhere(roots: string[], runId: string): void {
+    for (const root of roots) {
       const runDir = path.join(root, 'runs', runId);
+
       if (fs.existsSync(runDir)) {
         fs.rmSync(runDir, { recursive: true, force: true });
       }
@@ -122,6 +133,7 @@ export class RetentionService {
       }
 
       const fullPath = path.join(runDir, entry, 'full');
+
       if (fs.existsSync(fullPath)) {
         try {
           if (fs.readdirSync(fullPath).length > 0) {

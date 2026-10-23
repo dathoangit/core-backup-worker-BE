@@ -1,7 +1,7 @@
-import type { Client } from 'pg';
+import { type Client } from 'pg';
 
+import { type SkippedTable, type TableRef } from '../types';
 import { quoteIdent } from './copy-writer';
-import type { SkippedTable, TableRef } from '../types';
 
 export interface ReadableTable extends TableRef {
   estimatedBytes: number;
@@ -69,6 +69,7 @@ export async function findSchemas(
     `,
     [candidates],
   );
+
   return result.rows.map((r) => r.nspname);
 }
 
@@ -89,6 +90,7 @@ export async function tableHasColumn(
     `,
     [schema, table, column],
   );
+
   return result.rowCount !== null && result.rowCount > 0;
 }
 
@@ -111,6 +113,7 @@ export async function getPrimaryKeyColumns(
     `,
     [schema, table],
   );
+
   return result.rows.map((r) => r.column_name);
 }
 
@@ -127,6 +130,7 @@ export async function captureMaxId(
     `,
   );
   const max = result.rows[0]?.max;
+
   return max ? BigInt(max) : 0n;
 }
 
@@ -145,5 +149,6 @@ export async function captureTipByOrder(
     `,
   );
   const id = result.rows[0]?.id;
+
   return id ? BigInt(id) : 0n;
 }

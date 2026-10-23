@@ -8,7 +8,7 @@ import {
 } from 'typeorm';
 
 import { AbstractEntity } from '../../../common/abstract.entity';
-import type { BackupProfile, SourceGroup } from '../types';
+import { type BackupProfile, type SourceGroup } from '../types';
 import { BackupRunEntity } from './backup-run.entity';
 
 @Entity({ name: 'backup_database_runs' })
@@ -29,13 +29,23 @@ export class BackupDatabaseRunEntity extends AbstractEntity {
   @Column({ type: 'varchar', length: 16 })
   status!: 'ok' | 'error' | 'skipped';
 
-  @Column({ name: 'watermark_before', type: 'varchar', length: 64, nullable: true })
+  @Column({
+    name: 'watermark_before',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+  })
   watermarkBefore!: string | null;
 
   @Column({ type: 'varchar', length: 64, nullable: true })
   captured!: string | null;
 
-  @Column({ name: 'watermark_after', type: 'varchar', length: 64, nullable: true })
+  @Column({
+    name: 'watermark_after',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+  })
   watermarkAfter!: string | null;
 
   @Column({ name: 'chunk_count', type: 'int', default: 0 })
