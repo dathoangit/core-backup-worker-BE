@@ -121,7 +121,7 @@ Runner kiểm tra `AbortSignal` giữa các bảng/chunk. Default `BACKUP_STATEM
 | `GET /api/v1/admin/backup/stream?runId=` | JWT | Legacy fan-out qua `BackupEventsService` |
 | `GET /api/v1/public/backup/stream` | Public | Wallboard, không log chi tiết |
 
-Worker publish: `%`, `rows_processed`, `current_table`, `log_line`, `status`. Snapshot cuối ở Redis key `backup:progress:last:<runId>`.
+Worker publish (camelCase JSON): `percent`, `rowsProcessed`, `bytesProcessed`, `rowsPerSec`, `bytesPerSec`, `etaSeconds`, `tablesDone`/`tablesTotal`, `dbIndex`/`dbCount`, `startedAt`, `currentDatabase`, `currentTable`, `log` line, `status`. Snapshot cuối ở Redis key `backup:progress:last:<runId>`. Public SSE bridge map sang `run.progress` (`rowsTotal` = cumulative processed, `bytesTotal`, rates, ETA).
 
 ---
 
@@ -152,8 +152,15 @@ Worker startup `recoverStaleState`: re-enqueue DB `queued` khi Redis mất job; 
 
 | Method | Path | Việc |
 |--------|------|------|
-| `GET` | `/api/v1/public/backup/overview` | Wallboard. |
-| `GET` | `/api/v1/public/backup/stream` | SSE wallboard. |
+| `GET` | `/api/v1/public/backup/overview` | Wallboard aggregate (xem payload bên dưới). |
+| `GET` | `/api/v1/public/backup/stream` | SSE wallboard (`run.progress` / `run.status`, không log). |
+
+**Overview extras (wallboard):**
+
+- `activeJob` — run `running` + last Redis progress (%, rows, bytes, rates, ETA).
+- `databases[].watermark`, `databases[].lagMinutes` — lag = phút kể từ `lastStartedAt` (backup freshness, không query tip nguồn).
+- `disk.forecast` — `dailyGrowthBytes` (sample 7 ngày tại `state/disk-usage-samples.json`), `compressionRatio` / `compressionSavingsPercent` (ước lượng từ row×180B vs gzip bytes), `estimatedDaysUntilFull`.
+- `schedule` — `enabled`, `nextIncrementalAt`, `nextFullAt`, `nextFullLabel` (cron sớm nhất, TZ `Asia/Ho_Chi_Minh`).
 
 ### Khác
 

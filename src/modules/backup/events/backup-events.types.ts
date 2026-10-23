@@ -26,12 +26,18 @@ export interface BackupRunProgressEvent {
   type: 'run.progress';
   runId: string;
   database: string | null;
+  currentTable?: string | null;
   tablesDone: number;
   tablesTotal: number;
   databasesDone: number;
   databasesTotal: number;
+  /** Cumulative rows processed so far (not a planned total). */
   rowsTotal: number;
   bytesTotal: number;
+  rowsPerSec?: number;
+  bytesPerSec?: number;
+  etaSeconds?: number | null;
+  startedAt?: string | null;
   percent: number;
   at: string;
 }

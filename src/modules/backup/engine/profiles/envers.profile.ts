@@ -140,6 +140,7 @@ async function snapshotAllTables(options: {
       tablesDone,
       tablesTotal: tables.length,
       rowsDelta: Math.max(result.rowCount, 0),
+      bytesDelta: Math.max(result.bytes, 0),
     });
   }
 

@@ -476,6 +476,7 @@ export async function backupMssqlSnapshot(options: {
               tablesDone,
               tablesTotal: tables.length,
               rowsDelta: exported.rowCount,
+              bytesDelta: exported.bytes,
             });
 
             if (rowLimit && tableRows >= rowLimit) {
@@ -542,6 +543,7 @@ export async function backupMssqlSnapshot(options: {
               tablesDone: tablesDone + 1,
               tablesTotal: tables.length,
               rowsDelta: exported.rowCount,
+              bytesDelta: exported.bytes,
             });
           }
         }

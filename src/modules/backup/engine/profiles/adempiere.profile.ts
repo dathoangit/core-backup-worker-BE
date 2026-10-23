@@ -344,6 +344,7 @@ async function fullDumpReadableTables(options: {
       tablesDone,
       tablesTotal: workTables.length,
       rowsDelta: Math.max(result.rowCount, 0),
+      bytesDelta: Math.max(result.bytes, 0),
     });
   }
 

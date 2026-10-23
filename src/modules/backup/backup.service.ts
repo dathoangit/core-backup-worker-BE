@@ -15,6 +15,11 @@ import {
   collectBackupDiskUsage,
   type IBackupDiskUsage,
 } from './disk-stats.util';
+import {
+  computeDiskGrowthForecast,
+  estimateGrowthFromBackupBytes,
+  recordDiskUsageSample,
+} from './disk-usage-history.util';
 import { BackupRunnerService } from './engine/backup-runner.service';
 import { createRunId } from './engine/manifest';
 import { loadState } from './engine/state';
@@ -25,6 +30,9 @@ import { BackupEventsService } from './events/backup-events.service';
 import { type BackupRunProgressContext } from './progress/backup-run-progress.context';
 import {
   aggregateHistoryByDay,
+  estimatedRowsTotal,
+  estimateGzipCompression,
+  lagMinutesFromLastStartedAt,
   PUBLIC_OVERVIEW_RECENT_JOBS,
   PUBLIC_OVERVIEW_RUN_SAMPLE,
   summarizeJobs,
@@ -34,6 +42,8 @@ import {
   BackupQueueService,
   type EnqueueBackupResult,
 } from './queue/backup-queue.service';
+import { BackupRedisService } from './queue/backup-redis.service';
+import { buildNextScheduleTimes } from './schedule-next.util';
 import { SourceRegistry } from './source-registry';
 import {
   type BackupMode,
@@ -66,11 +76,45 @@ export interface PublicOverviewDatabase {
   lastRunStatus: BackupRunStatus | null;
   lastStartedAt: string | null;
   watermark: string | null;
+  /** Minutes since lastStartedAt (backup freshness lag, not source tip lag). */
+  lagMinutes: number | null;
+}
+
+export interface PublicOverviewActiveJob {
+  runId: string;
+  mode: BackupMode;
+  status: BackupRunStatus;
+  startedAt: string | null;
+  percent: number;
+  rowsProcessed: number;
+  estimatedRowsTotal: number | null;
+  bytesProcessed: number;
+  rowsPerSec: number;
+  bytesPerSec: number;
+  etaSeconds: number | null;
+  currentDatabase: string | null;
+  currentTable: string | null;
+}
+
+export interface PublicOverviewScheduleTarget {
+  group: SourceGroup;
+  database: string;
+}
+
+export interface PublicOverviewSchedule {
+  enabled: boolean | null;
+  nextIncrementalAt: string | null;
+  nextFullAt: string | null;
+  nextFullLabel: string | null;
+  nextIncrementalDatabases: PublicOverviewScheduleTarget[];
+  nextFullDatabases: PublicOverviewScheduleTarget[];
+  nextFullGroups: SourceGroup[];
 }
 
 export interface PublicOverviewResponse {
   generatedAt: string;
   scheduleEnabled: boolean | null;
+  schedule: PublicOverviewSchedule;
   freshness: {
     healthy: boolean;
     lastSuccessAt: string | null;
@@ -78,6 +122,7 @@ export interface PublicOverviewResponse {
     ageHours: number | null;
   };
   databases: PublicOverviewDatabase[];
+  activeJob: PublicOverviewActiveJob | null;
   jobSummary: {
     ok: number;
     error: number;
@@ -91,6 +136,9 @@ export interface PublicOverviewResponse {
     error: number;
     partial: number;
     running: number;
+    bytesWritten: number;
+    durationSecAvg: number | null;
+    rowCountTotal: number;
   }>;
   recentJobs: Array<{
     runId: string;
@@ -139,6 +187,8 @@ export class BackupService {
     @Optional()
     @Inject(forwardRef(() => BackupQueueService))
     private readonly backupQueue?: BackupQueueService,
+    @Optional()
+    private readonly backupRedis?: BackupRedisService,
     @Optional()
     @InjectRepository(BackupRunEntity)
     private readonly runRepo?: Repository<BackupRunEntity>,
@@ -444,27 +494,25 @@ export class BackupService {
   /** Read-only aggregate for the public TV wallboard. */
   async getPublicOverview(): Promise<PublicOverviewResponse> {
     const now = new Date();
-    const [sources, runs, zones, freshness, disk] = await Promise.all([
+    const [sources, runs, zones, freshness, schedule] = await Promise.all([
       this.listSources(),
       this.listRuns(PUBLIC_OVERVIEW_RUN_SAMPLE),
       this.getZones(),
       this.getFreshness(),
-      this.readDiskUsage(),
+      this.resolvePublicSchedule(),
     ]);
 
-    let scheduleEnabled: boolean | null = null;
-
-    try {
-      scheduleEnabled = (await this.backupConfig.getSettings()).scheduleEnabled;
-    } catch {
-      scheduleEnabled = null;
-    }
+    const compression = estimateGzipCompression(
+      this.collectCompressionSamples(runs),
+    );
+    const disk = await this.readDiskUsageWithForecast(compression, runs, now);
 
     const databases: PublicOverviewDatabase[] = [];
 
     for (const source of sources) {
       for (const database of source.databases) {
         const latest = this.findLatestDbRun(runs, source.group, database);
+        const lagAnchor = latest?.finishedAt ?? latest?.startedAt ?? null;
         databases.push({
           group: source.group,
           database,
@@ -476,6 +524,7 @@ export class BackupService {
           lastRunStatus: latest?.runStatus ?? null,
           lastStartedAt: latest?.startedAt ?? null,
           watermark: source.watermarks[database] ?? null,
+          lagMinutes: lagMinutesFromLastStartedAt(lagAnchor, now),
         });
       }
 
@@ -491,6 +540,7 @@ export class BackupService {
           lastRunStatus: null,
           lastStartedAt: null,
           watermark: null,
+          lagMinutes: null,
         });
       }
     }
@@ -499,14 +549,42 @@ export class BackupService {
       startedAt: run.startedAt,
       status: run.status,
     }));
+    const historyRuns = runs.map((run) => {
+      let bytesWritten = 0;
+      let rowCountTotal = 0;
+
+      for (const db of run.databases ?? []) {
+        const bytes = Number(db.bytesTotal ?? 0);
+        const rows = Number(db.rowCountTotal ?? 0);
+
+        if (Number.isFinite(bytes) && bytes > 0) {
+          bytesWritten += bytes;
+        }
+
+        if (Number.isFinite(rows) && rows > 0) {
+          rowCountTotal += rows;
+        }
+      }
+
+      return {
+        startedAt: run.startedAt,
+        finishedAt: run.finishedAt,
+        status: run.status,
+        bytesWritten,
+        rowCountTotal,
+      };
+    });
+    const activeJob = await this.resolveActiveJob(runs);
 
     return {
       generatedAt: now.toISOString(),
-      scheduleEnabled,
+      scheduleEnabled: schedule.enabled,
+      schedule,
       freshness,
       databases,
+      activeJob,
       jobSummary: summarizeJobs(runRows, now),
-      historyByDay: aggregateHistoryByDay(runRows, now),
+      historyByDay: aggregateHistoryByDay(historyRuns, now),
       recentJobs: runs.slice(0, PUBLIC_OVERVIEW_RECENT_JOBS).map((run) => ({
         runId: run.runId,
         status: run.status,
@@ -559,6 +637,249 @@ export class BackupService {
     }
   }
 
+  private async readDiskUsageWithForecast(
+    compression: {
+      compressionRatio: number | null;
+      compressionSavingsPercent: number | null;
+    },
+    runs: BackupRunEntity[],
+    now = new Date(),
+  ): Promise<IBackupDiskUsage | null> {
+    try {
+      const settings = await this.backupConfig.getSettings();
+      const disk = await collectBackupDiskUsage({
+        diskPath: settings.backupRoot ?? settings.backupDir,
+        metaPath: settings.backupDir,
+        volumePaths: [
+          settings.volumeDirs.HIS,
+          settings.volumeDirs.EMR,
+          settings.volumeDirs.LIS,
+        ],
+      });
+
+      if (!disk?.exists) {
+        return disk
+          ? {
+              ...disk,
+              forecast: {
+                dailyGrowthBytes: null,
+                compressionRatio: compression.compressionRatio,
+                compressionSavingsPercent:
+                  compression.compressionSavingsPercent,
+                estimatedDaysUntilFull: null,
+              },
+            }
+          : null;
+      }
+
+      const samples = recordDiskUsageSample(settings.backupDir, disk.usedBytes);
+      let growth = computeDiskGrowthForecast(samples, disk.freeBytes);
+
+      if (growth.dailyGrowthBytes == null) {
+        const written = this.sumOkBackupBytesLastDays(runs, now, 7);
+        growth = estimateGrowthFromBackupBytes(written, disk.freeBytes, 7);
+      }
+
+      return {
+        ...disk,
+        forecast: {
+          dailyGrowthBytes: growth.dailyGrowthBytes,
+          compressionRatio: compression.compressionRatio,
+          compressionSavingsPercent: compression.compressionSavingsPercent,
+          estimatedDaysUntilFull: growth.estimatedDaysUntilFull,
+        },
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private sumOkBackupBytesLastDays(
+    runs: BackupRunEntity[],
+    now: Date,
+    days: number,
+  ): number {
+    const cutoff = now.getTime() - days * 86_400_000;
+    let total = 0;
+
+    for (const run of runs) {
+      const started =
+        run.startedAt instanceof Date ? run.startedAt : new Date(run.startedAt);
+
+      if (Number.isNaN(started.getTime()) || started.getTime() < cutoff) {
+        continue;
+      }
+
+      for (const db of run.databases ?? []) {
+        if (db.status !== 'ok') {
+          continue;
+        }
+
+        const bytes = Number(db.bytesTotal ?? 0);
+
+        if (Number.isFinite(bytes) && bytes > 0) {
+          total += bytes;
+        }
+      }
+    }
+
+    return total;
+  }
+
+  private async resolvePublicSchedule(): Promise<PublicOverviewSchedule> {
+    let enabled: boolean | null = null;
+
+    try {
+      enabled = (await this.backupConfig.getSettings()).scheduleEnabled;
+    } catch {
+      enabled = null;
+    }
+
+    const empty: PublicOverviewSchedule = {
+      enabled,
+      nextIncrementalAt: null,
+      nextFullAt: null,
+      nextFullLabel: null,
+      nextIncrementalDatabases: [],
+      nextFullDatabases: [],
+      nextFullGroups: [],
+    };
+
+    try {
+      const databases =
+        await this.backupConfig.listConfiguredScheduleDatabases();
+      const buckets =
+        await this.backupConfig.getIncrementalCronBuckets(databases);
+
+      const byGroup = new Map<SourceGroup, typeof databases>();
+
+      for (const entry of databases) {
+        const list = byGroup.get(entry.group) ?? [];
+        list.push(entry);
+        byGroup.set(entry.group, list);
+      }
+
+      const fullGroups: Array<{
+        group: SourceGroup;
+        cron: string;
+        databases: typeof databases;
+      }> = [];
+
+      for (const group of ['HIS', 'EMR', 'LIS'] as const) {
+        const cron = await this.backupConfig.getSettingValue(
+          `BACKUP_${group}_FULL_CRON`,
+        );
+
+        if (!cron?.trim()) {
+          continue;
+        }
+
+        fullGroups.push({
+          group,
+          cron: cron.trim(),
+          databases: byGroup.get(group) ?? [],
+        });
+      }
+
+      const next = buildNextScheduleTimes({
+        enabled,
+        incrementalBuckets: buckets,
+        fullGroups,
+      });
+
+      return { enabled, ...next };
+    } catch {
+      return empty;
+    }
+  }
+
+  private collectCompressionSamples(
+    runs: BackupRunEntity[],
+  ): Array<{ rowCountTotal: number; bytesTotal: number }> {
+    const samples: Array<{ rowCountTotal: number; bytesTotal: number }> = [];
+
+    for (const run of runs) {
+      for (const db of run.databases ?? []) {
+        if (db.status !== 'ok') {
+          continue;
+        }
+
+        const rowCountTotal = Number(db.rowCountTotal ?? 0);
+        const bytesTotal = Number(db.bytesTotal ?? 0);
+
+        if (rowCountTotal > 0 && bytesTotal > 0) {
+          samples.push({ rowCountTotal, bytesTotal });
+        }
+
+        if (samples.length >= 40) {
+          return samples;
+        }
+      }
+    }
+
+    return samples;
+  }
+
+  private async resolveActiveJob(
+    runs: BackupRunEntity[],
+  ): Promise<PublicOverviewActiveJob | null> {
+    const running = runs.find((run) => run.status === 'running');
+
+    if (!running) {
+      return null;
+    }
+
+    const startedAt =
+      running.startedAt instanceof Date
+        ? running.startedAt.toISOString()
+        : String(running.startedAt);
+    let percent = 0;
+    let rowsProcessed = 0;
+    let bytesProcessed = 0;
+    let rowsPerSec = 0;
+    let bytesPerSec = 0;
+    let etaSeconds: number | null = null;
+    let currentDatabase: string | null = null;
+    let currentTable: string | null = null;
+    let progressStartedAt: string | null = startedAt;
+
+    if (this.backupRedis) {
+      try {
+        const last = await this.backupRedis.getLastProgress(running.runId);
+
+        if (last) {
+          percent = last.percent ?? percent;
+          rowsProcessed = last.rowsProcessed ?? rowsProcessed;
+          bytesProcessed = last.bytesProcessed ?? bytesProcessed;
+          rowsPerSec = last.rowsPerSec ?? rowsPerSec;
+          bytesPerSec = last.bytesPerSec ?? bytesPerSec;
+          etaSeconds = last.etaSeconds ?? etaSeconds;
+          currentDatabase = last.currentDatabase ?? currentDatabase;
+          currentTable = last.currentTable ?? currentTable;
+          progressStartedAt = last.startedAt ?? progressStartedAt;
+        }
+      } catch {
+        // ignore redis errors for wallboard
+      }
+    }
+
+    return {
+      runId: running.runId,
+      mode: running.mode,
+      status: 'running',
+      startedAt: progressStartedAt,
+      percent,
+      rowsProcessed,
+      estimatedRowsTotal: estimatedRowsTotal(rowsProcessed, percent),
+      bytesProcessed,
+      rowsPerSec,
+      bytesPerSec,
+      etaSeconds,
+      currentDatabase,
+      currentTable,
+    };
+  }
+
   private findLatestDbRun(
     runs: BackupRunEntity[],
     group: SourceGroup,
@@ -567,27 +888,53 @@ export class BackupService {
     dbStatus: 'ok' | 'error' | 'skipped';
     runStatus: BackupRunStatus;
     startedAt: string;
+    finishedAt: string | null;
   } | null {
+    let fallback: {
+      dbStatus: 'ok' | 'error' | 'skipped';
+      runStatus: BackupRunStatus;
+      startedAt: string;
+      finishedAt: string | null;
+    } | null = null;
+
     for (const run of runs) {
-      const db = run.databases.find(
+      const dbs = run.databases ?? [];
+      const exact = dbs.find(
         (row) => row.database === database && row.sourceGroup === group,
       );
+      const byName =
+        exact ?? dbs.find((row) => row.database === database) ?? null;
 
-      if (!db) {
+      if (!byName) {
         continue;
       }
 
-      return {
-        dbStatus: db.status,
+      const startedAt =
+        run.startedAt instanceof Date
+          ? run.startedAt.toISOString()
+          : String(run.startedAt);
+      const finishedAt = run.finishedAt
+        ? run.finishedAt instanceof Date
+          ? run.finishedAt.toISOString()
+          : String(run.finishedAt)
+        : null;
+      const hit = {
+        dbStatus: byName.status,
         runStatus: run.status,
-        startedAt:
-          run.startedAt instanceof Date
-            ? run.startedAt.toISOString()
-            : String(run.startedAt),
+        startedAt,
+        finishedAt,
       };
+
+      if (byName.status === 'ok') {
+        return hit;
+      }
+
+      if (!fallback) {
+        fallback = hit;
+      }
     }
 
-    return null;
+    return fallback;
   }
 
   private async historyEnabled(): Promise<boolean> {

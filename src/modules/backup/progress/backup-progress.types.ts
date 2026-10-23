@@ -6,6 +6,15 @@ export interface BackupProgressMessage {
   at: string;
   percent?: number;
   rowsProcessed?: number;
+  bytesProcessed?: number;
+  rowsPerSec?: number;
+  bytesPerSec?: number;
+  etaSeconds?: number | null;
+  tablesDone?: number;
+  tablesTotal?: number;
+  dbIndex?: number;
+  dbCount?: number;
+  startedAt?: string;
   currentDatabase?: string;
   currentTable?: string;
   line?: string;
@@ -19,6 +28,7 @@ export interface BackupTableProgress {
   tablesDone: number;
   tablesTotal: number;
   rowsDelta?: number;
+  bytesDelta?: number;
 }
 
 export interface BackupProgressSink {

@@ -17,9 +17,24 @@ describe('public-overview.util', () => {
     const now = new Date('2026-03-16T05:00:00.000Z');
     const history = aggregateHistoryByDay(
       [
-        { startedAt: new Date('2026-03-16T01:00:00.000Z'), status: 'ok' },
-        { startedAt: new Date('2026-03-16T02:00:00.000Z'), status: 'error' },
-        { startedAt: new Date('2026-03-15T10:00:00.000Z'), status: 'partial' },
+        {
+          startedAt: new Date('2026-03-16T01:00:00.000Z'),
+          finishedAt: new Date('2026-03-16T01:10:00.000Z'),
+          status: 'ok',
+          bytesWritten: 1_000_000,
+          rowCountTotal: 500,
+        },
+        {
+          startedAt: new Date('2026-03-16T02:00:00.000Z'),
+          finishedAt: new Date('2026-03-16T02:20:00.000Z'),
+          status: 'error',
+          bytesWritten: 200_000,
+          rowCountTotal: 50,
+        },
+        {
+          startedAt: new Date('2026-03-15T10:00:00.000Z'),
+          status: 'partial',
+        },
       ],
       now,
     );
@@ -31,6 +46,9 @@ describe('public-overview.util', () => {
       error: 1,
       partial: 0,
       running: 0,
+      bytesWritten: 1_200_000,
+      rowCountTotal: 550,
+      durationSecAvg: 900,
     });
   });
 

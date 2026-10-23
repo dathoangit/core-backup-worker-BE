@@ -38,15 +38,22 @@ export class BackupProgressBridge implements OnModuleInit, OnModuleDestroy {
   private forward(message: BackupProgressMessage): void {
     switch (message.type) {
       case 'progress': {
+        const dbIndex = message.dbIndex ?? 0;
+        const dbCount = Math.max(message.dbCount ?? 1, 1);
         this.backupEvents.emitProgress({
           runId: message.runId,
           database: message.currentDatabase ?? null,
-          tablesDone: 0,
-          tablesTotal: 0,
-          databasesDone: 0,
-          databasesTotal: 0,
+          currentTable: message.currentTable ?? null,
+          tablesDone: message.tablesDone ?? 0,
+          tablesTotal: message.tablesTotal ?? 0,
+          databasesDone: dbIndex,
+          databasesTotal: dbCount,
           rowsTotal: message.rowsProcessed ?? 0,
-          bytesTotal: 0,
+          bytesTotal: message.bytesProcessed ?? 0,
+          rowsPerSec: message.rowsPerSec ?? 0,
+          bytesPerSec: message.bytesPerSec ?? 0,
+          etaSeconds: message.etaSeconds ?? null,
+          startedAt: message.startedAt ?? null,
           percent: message.percent ?? 0,
           at: message.at,
         });

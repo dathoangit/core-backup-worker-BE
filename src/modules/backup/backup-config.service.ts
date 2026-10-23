@@ -341,6 +341,30 @@ export class BackupConfigService {
     };
   }
 
+  /** Public read for wallboard / schedule helpers (non-secret keys). */
+  async getSettingValue(name: string): Promise<string | undefined> {
+    return this.read(name);
+  }
+
+  async getFullBackupCronExpressions(): Promise<string[]> {
+    const keys = [
+      'BACKUP_HIS_FULL_CRON',
+      'BACKUP_EMR_FULL_CRON',
+      'BACKUP_LIS_FULL_CRON',
+    ] as const;
+    const values: string[] = [];
+
+    for (const key of keys) {
+      const raw = await this.read(key);
+
+      if (raw?.trim()) {
+        values.push(raw.trim());
+      }
+    }
+
+    return values;
+  }
+
   private async read(name: string): Promise<string | undefined> {
     if (this.settingsService) {
       return this.settingsService.get(name);

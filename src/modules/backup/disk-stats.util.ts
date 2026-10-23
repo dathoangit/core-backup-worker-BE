@@ -8,6 +8,13 @@ export interface IDiskFolderUsage {
   bytes: number;
 }
 
+export interface IDiskForecast {
+  dailyGrowthBytes: number | null;
+  compressionRatio: number | null;
+  compressionSavingsPercent: number | null;
+  estimatedDaysUntilFull: number | null;
+}
+
 /** One physical disk. `folders` are backup directories on that disk, plus free/other. */
 export interface IBackupDiskUsage {
   path: string;
@@ -18,6 +25,7 @@ export interface IBackupDiskUsage {
   availableBytes: number;
   usedPercent: number;
   folders: IDiskFolderUsage[];
+  forecast?: IDiskForecast | null;
 }
 
 export interface IBackupDiskUsageInput {
