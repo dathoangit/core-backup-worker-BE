@@ -5,7 +5,6 @@ import {
   Injectable,
   Logger,
   MethodNotAllowedException,
-  NotFoundException,
   OnModuleInit,
   Optional,
   forwardRef,
@@ -17,10 +16,13 @@ import { randomUUID } from 'node:crypto';
 
 import { BackupService } from '../backup/backup.service';
 import {
+  getSettingDef,
   isAllowlistedSettingKey,
+  isPerDatabaseIncrementalCronKey,
   isRestartRequiredSettingKey,
   SETTING_KEY_DEFS,
   type SettingCategory,
+  type SettingKeyDef,
 } from './settings.constants';
 import { DEFAULT_INCREMENTAL_CRON } from '../backup/incremental-schedule';
 import { decryptSecret, encryptSecret } from './settings-crypto';
@@ -48,6 +50,7 @@ export class SettingsService implements OnModuleInit {
     try {
       await this.seedFromEnvIfEmpty();
       await this.ensureMissingAllowlistedSettings();
+      await this.fillEmptySettingsFromEnv();
     } catch (error) {
       this.logger.warn(
         `Settings seed skipped: ${error instanceof Error ? error.message : String(error)}`,
@@ -85,8 +88,9 @@ export class SettingsService implements OnModuleInit {
   }
 
   /**
-   * Inserts newly allowlisted keys (e.g. per-DB crons) into existing installs
-   * without overwriting values the operator already set.
+   * Inserts newly allowlisted keys into existing installs.
+   * When env has no value, inserts an empty row so FE can fill it (e.g. EMR_PASSWORD).
+   * Never overwrites values the operator already set.
    */
   async ensureMissingAllowlistedSettings(): Promise<number> {
     let inserted = 0;
@@ -97,16 +101,19 @@ export class SettingsService implements OnModuleInit {
       }
 
       const value = this.defaultValueForKey(def.key);
-      if (value === undefined) {
-        continue;
-      }
+      const stored =
+        value === undefined
+          ? null
+          : def.isSecret
+            ? this.encryptOrThrow(value)
+            : value;
 
       const row = this.repo.create({
         id: randomUUID() as Uuid,
         key: def.key,
         category: def.category,
         isSecret: def.isSecret,
-        value: def.isSecret ? this.encryptOrThrow(value) : value,
+        value: stored,
       });
       await this.repo.save(row);
       inserted += 1;
@@ -117,6 +124,43 @@ export class SettingsService implements OnModuleInit {
     }
 
     return inserted;
+  }
+
+  /**
+   * Fills allowlisted rows that exist but have an empty value, from process env.
+   * Does not overwrite non-empty DB values (use `yarn settings:sync-from-env -- --force`).
+   */
+  async fillEmptySettingsFromEnv(): Promise<number> {
+    let filled = 0;
+    for (const def of SETTING_KEY_DEFS) {
+      const existing = await this.repo.findOne({ where: { key: def.key } });
+      if (!existing) {
+        continue;
+      }
+
+      if (
+        existing.value !== null &&
+        existing.value !== undefined &&
+        existing.value !== ''
+      ) {
+        continue;
+      }
+
+      const value = this.defaultValueForKey(def.key);
+      if (value === undefined) {
+        continue;
+      }
+
+      existing.value = def.isSecret ? this.encryptOrThrow(value) : value;
+      await this.repo.save(existing);
+      filled += 1;
+    }
+
+    if (filled > 0) {
+      this.logger.log(`Filled ${filled} empty setting(s) from env`);
+    }
+
+    return filled;
   }
 
   private defaultValueForKey(key: string): string | undefined {
@@ -196,31 +240,72 @@ export class SettingsService implements OnModuleInit {
       where,
       order: { category: 'ASC', key: 'ASC' },
     });
+    const byKey = new Map(rows.map((row) => [row.key, row]));
 
-    return rows.map((row) => this.toResponse(row));
+    const defs = category
+      ? SETTING_KEY_DEFS.filter((def) => def.category === category)
+      : SETTING_KEY_DEFS;
+
+    const result: SettingResponseDto[] = [];
+    const seen = new Set<string>();
+
+    for (const def of defs) {
+      seen.add(def.key);
+      const row = byKey.get(def.key);
+      result.push(row ? this.toResponse(row) : this.toPlaceholderResponse(def));
+    }
+
+    // Extra allowlisted rows (e.g. per-DB cron added later) not in static defs.
+    for (const row of rows) {
+      if (seen.has(row.key) || !isAllowlistedSettingKey(row.key)) {
+        continue;
+      }
+      result.push(this.toResponse(row));
+    }
+
+    return result.sort((a, b) => {
+      if (a.category !== b.category) {
+        return a.category.localeCompare(b.category);
+      }
+
+      return a.key.localeCompare(b.key);
+    });
   }
 
   async getOne(key: string): Promise<SettingResponseDto> {
+    this.assertAllowlisted(key);
     const row = await this.repo.findOne({ where: { key } });
-    if (!row) {
-      throw new NotFoundException(`Setting ${key} not found`);
+    if (row) {
+      return this.toResponse(row);
     }
 
-    return this.toResponse(row);
+    return this.toPlaceholderResponse(this.resolveSettingDef(key));
   }
 
   async create(_dto: CreateSettingDto): Promise<SettingResponseDto> {
     throw new MethodNotAllowedException(
-      'Creating settings is not allowed; update an existing setting instead',
+      'Creating settings is not allowed; use PUT /admin/settings/:key to upsert',
     );
   }
 
+  /**
+   * Upsert allowlisted setting. Missing rows (e.g. EMR_PASSWORD never seeded)
+   * are created so operators can fill secrets from the FE without editing env.
+   */
   async update(key: string, dto: UpdateSettingDto): Promise<SettingResponseDto> {
     this.assertAllowlisted(key);
     await this.assertCanMutateRestartRequiredKey(key);
-    const row = await this.repo.findOne({ where: { key } });
+
+    let row = await this.repo.findOne({ where: { key } });
     if (!row) {
-      throw new NotFoundException(`Setting ${key} not found`);
+      const def = this.resolveSettingDef(key);
+      row = this.repo.create({
+        id: randomUUID() as Uuid,
+        key: def.key,
+        category: def.category,
+        isSecret: def.isSecret,
+        value: null,
+      });
     }
 
     if (dto.value !== undefined) {
@@ -248,6 +333,37 @@ export class SettingsService implements OnModuleInit {
         `Key ${key} is not in the allowlist of manageable settings`,
       );
     }
+  }
+
+  private resolveSettingDef(key: string): SettingKeyDef {
+    const def = getSettingDef(key);
+    if (def) {
+      return def;
+    }
+
+    if (isPerDatabaseIncrementalCronKey(key)) {
+      return { key, category: 'backup', isSecret: false };
+    }
+
+    throw new ConflictException(
+      `Key ${key} is not in the allowlist of manageable settings`,
+    );
+  }
+
+  /** Virtual row for allowlisted keys not yet persisted (FE can still edit via PUT). */
+  private toPlaceholderResponse(def: SettingKeyDef): SettingResponseDto {
+    const epoch = new Date(0);
+
+    return {
+      id: '',
+      key: def.key,
+      value: null,
+      isSecret: def.isSecret,
+      hasValue: false,
+      category: def.category,
+      createdAt: epoch,
+      updatedAt: epoch,
+    };
   }
 
   private async assertCanMutateRestartRequiredKey(key: string): Promise<void> {

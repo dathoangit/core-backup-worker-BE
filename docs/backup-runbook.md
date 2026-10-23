@@ -123,8 +123,36 @@ What happens:
 
 ## Settings in app DB
 
-`BACKUP_*` and `HIS_*` / `EMR_*` / `BADL_*` are stored in MySQL table `app_settings`
-(seeded once from `.env` on first boot). Runtime reads **DB first**, then env.
+`BACKUP_*` and `HIS_*` / `EMR_*` / `BADL_*` / `LIS_*` are stored in the app DB table
+`app_settings` (seeded from env on first boot; empty/missing allowlisted keys are
+created so the FE can edit them). Runtime reads **DB first**, then env.
+
+Missing secrets (e.g. `EMR_PASSWORD` never seeded) appear on the FE as empty —
+use **Sửa** to upsert; no env change required. `PUT /admin/settings/:key` creates
+the row when absent.
+
+### Sync credentials from env → DB
+
+When production was seeded with empty `EMR_PASSWORD` (etc.), push passwords from an
+env file without wiping volume paths:
+
+```bash
+# Preview (sources only: HIS_/EMR_/LIS_/BADL_)
+yarn settings:sync-from-env -- --env-file=.env.production --dry-run
+
+# Write missing/empty source settings
+yarn settings:sync-from-env -- --env-file=.env.production
+
+# Overwrite existing source settings from the env file
+yarn settings:sync-from-env -- --env-file=.env.production --force
+```
+
+`SETTINGS_SECRET_KEY` in that env file **must match** the running app (encrypts
+`*_PASSWORD`). Point `DB_*` at the same app database the container uses. After sync,
+reload FE Databases — EMR should show `ready` when user/password are set.
+
+Use `--all` to sync cron/schedule keys too; add `--include-paths` only when you
+intentionally want to overwrite `BACKUP_VOLUME_*` / `BACKUP_ROOT`.
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -222,6 +250,26 @@ Notes:
   container.
 - The image runs `node dist/main.js` directly. `yarn backup:run` needs ts-node and is
   not available inside the image; trigger runs through the Nest scheduler or the admin API.
+- FE **Databases** page: each `ready` card has **Start** (incremental for that DB only).
+  History shows a `running` row as soon as the job takes the lock.
+
+### Wipe + fresh seed (clean slate)
+
+Use when you want every source credential ready immediately after boot (no FE password
+entry). **Do this before** `docker compose up`:
+
+1. Fill `.env.production` completely — `HIS_*` / `EMR_*` / `LIS_*` passwords must be
+   non-empty; paths `BACKUP_ROOT=/app/backup-storage` + volume dirs; `BACKUP_DEV_ROW_LIMIT=0`;
+   `DB_*`, Redis, JWT, `SETTINGS_SECRET_KEY`.
+2. Drop/recreate the app MySQL database (e.g. `his-raw-backup`).
+3. `docker compose down` (BE + FE as needed). Optional: remove stale
+   `/mnt/5AE4E9F5E4E9D375/backup-storage/meta/backup.lock`.
+4. Pull latest code → `./scripts/deploy-prod.sh` (BE), then FE deploy script.
+5. Confirm logs contain `Seeded N settings from env`. FE Databases should show HIS/EMR/LIS
+   as `ready` (BADL may stay `unreachable`). Click **Start** on a single DB to verify.
+
+If passwords were empty at first seed, either wipe again with a full env, use FE **Sửa**
+on the missing secret keys, or `yarn settings:sync-from-env -- --env-file=.env.production --force`.
 
 ### Windows Task Scheduler alternative
 

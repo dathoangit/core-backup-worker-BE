@@ -149,6 +149,7 @@ export class BackupService {
     this.inFlightRunId = runId;
 
     void this.startBackground(options, runId).catch((error: unknown) => {
+      this.clearInFlight(runId);
       this.logger.error(
         `background backup failed: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -544,6 +545,12 @@ export class BackupService {
     return entities;
   }
 
+  private clearInFlight(runId: string): void {
+    if (this.inFlightRunId === runId) {
+      this.inFlightRunId = null;
+    }
+  }
+
   private async startBackground(
     options: BackupRunOptions,
     runId: string,
@@ -556,21 +563,26 @@ export class BackupService {
         this.logger.error(
           'background backup aborted: backup.lock held by another process',
         );
+        this.clearInFlight(runId);
 
         return;
       }
 
       try {
         await this.executeRun(options, lock, runId);
+      } catch (error) {
+        await this.failRunHistory(
+          runId,
+          options,
+          settings.backupDir,
+          error instanceof Error ? error.message : String(error),
+        );
+        throw error;
       } finally {
-        if (this.inFlightRunId === runId) {
-          this.inFlightRunId = null;
-        }
+        this.clearInFlight(runId);
       }
     } catch (error) {
-      if (this.inFlightRunId === runId) {
-        this.inFlightRunId = null;
-      }
+      this.clearInFlight(runId);
       throw error;
     }
   }
@@ -601,6 +613,7 @@ export class BackupService {
       }
 
       const config = await this.backupConfig.getBackupConfig(sources, mode);
+      await this.markRunRunning(runId, options, config.backupDir);
       const manifest = await this.runner.run(config, runId);
 
       const archive = await this.archiveTarget.publishRun(
@@ -619,6 +632,83 @@ export class BackupService {
     }
   }
 
+  /** Insert a `running` row so FE history updates immediately after trigger. */
+  private async markRunRunning(
+    runId: string,
+    options: BackupRunOptions,
+    backupDir: string,
+  ): Promise<void> {
+    if (!this.runRepo || !(await this.historyEnabled())) {
+      return;
+    }
+
+    try {
+      const existing = await this.runRepo.findOne({ where: { runId } });
+      if (existing) {
+        return;
+      }
+
+      await this.runRepo.save(
+        this.runRepo.create({
+          runId,
+          startedAt: new Date(),
+          finishedAt: null,
+          status: 'running',
+          trigger: options.trigger,
+          mode: options.mode ?? 'incremental',
+          backupDir,
+          error: null,
+          archiveStatus: null,
+        }),
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed to mark run ${runId} as running: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  private async failRunHistory(
+    runId: string,
+    options: BackupRunOptions,
+    backupDir: string,
+    message: string,
+  ): Promise<void> {
+    if (!this.runRepo || !(await this.historyEnabled())) {
+      return;
+    }
+
+    try {
+      let row = await this.runRepo.findOne({ where: { runId } });
+      if (!row) {
+        row = this.runRepo.create({
+          runId,
+          startedAt: new Date(),
+          finishedAt: null,
+          status: 'error',
+          trigger: options.trigger,
+          mode: options.mode ?? 'incremental',
+          backupDir,
+          error: message,
+          archiveStatus: null,
+        });
+      } else {
+        row.status = 'error';
+        row.error = message;
+        row.finishedAt = new Date();
+      }
+      await this.runRepo.save(row);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to persist failed run ${runId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   private async persistHistory(
     manifest: RunManifest,
     trigger: BackupTrigger,
@@ -630,23 +720,47 @@ export class BackupService {
 
     try {
       const status = this.aggregateStatus(manifest.databases);
-      const run = this.runRepo.create({
-        runId: manifest.runId,
-        startedAt: new Date(manifest.startedAt),
-        finishedAt: manifest.finishedAt ? new Date(manifest.finishedAt) : null,
-        status,
-        trigger,
-        mode: manifest.mode ?? 'incremental',
-        backupDir: manifest.backupDir,
-        error: null,
-        archiveStatus,
+      let saved = await this.runRepo.findOne({
+        where: { runId: manifest.runId },
       });
-      const saved = await this.runRepo.save(run);
+
+      if (saved) {
+        saved.startedAt = new Date(manifest.startedAt);
+        saved.finishedAt = manifest.finishedAt
+          ? new Date(manifest.finishedAt)
+          : null;
+        saved.status = status;
+        saved.trigger = trigger;
+        saved.mode = manifest.mode ?? 'incremental';
+        saved.backupDir = manifest.backupDir;
+        saved.error = null;
+        saved.archiveStatus = archiveStatus;
+        saved = await this.runRepo.save(saved);
+        await this.dbRunRepo.delete({ runId: manifest.runId });
+      } else {
+        saved = await this.runRepo.save(
+          this.runRepo.create({
+            runId: manifest.runId,
+            startedAt: new Date(manifest.startedAt),
+            finishedAt: manifest.finishedAt
+              ? new Date(manifest.finishedAt)
+              : null,
+            status,
+            trigger,
+            mode: manifest.mode ?? 'incremental',
+            backupDir: manifest.backupDir,
+            error: null,
+            archiveStatus,
+          }),
+        );
+      }
 
       const dbRows = manifest.databases.map((db) =>
-        this.dbRunRepo!.create(this.toDbRunEntity(db, saved.id, manifest.runId)),
+        this.dbRunRepo!.create(this.toDbRunEntity(db, saved!.id, manifest.runId)),
       );
-      await this.dbRunRepo.save(dbRows);
+      if (dbRows.length > 0) {
+        await this.dbRunRepo.save(dbRows);
+      }
     } catch (error) {
       this.logger.warn(
         `Failed to persist backup history: ${

@@ -21,6 +21,7 @@
     "dev": "cross-env NODE_ENV=development BACKUP_PROFILE=dev nest start --watch",
     "debug:dev": "cross-env NODE_ENV=development TS_NODE_CACHE=false ts-node-dev --inspect --ignore '/^src/.*\\.spec\\.ts$/' src/main.ts",
     "backup:ensure-volumes": "node scripts/ensure-backup-volumes.js",
+    "settings:sync-from-env": "node -r ts-node/register/transpile-only scripts/sync-settings-from-env.ts",
     "lint": "eslint . --ext .ts",
     "lint:fix": "eslint --fix . --ext .ts",
     "test": "NODE_ENV=test jest",
