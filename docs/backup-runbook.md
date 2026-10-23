@@ -160,9 +160,10 @@ Requires login JWT (`@Auth()` — any authenticated user):
 
 ### Nest cron (one API / worker instance only)
 
-```env
-BACKUP_SCHEDULE_ENABLED=true
-```
+Cron jobs are **always registered at process boot**. Enable/disable is
+`BACKUP_SCHEDULE_ENABLED` in `app_settings` (FE toggle under Cấu hình) — takes
+effect immediately at fire time; no env edit or restart needed to turn the
+schedule on or off. Env is only the seed/fallback when the DB row is empty.
 
 | Job | Cron source | Mode | Scope |
 | --- | --- | --- | --- |
@@ -176,7 +177,9 @@ Examples:
 - Set `BACKUP_EMR_INCREMENTAL_CRON=30 */4 * * *` to offset all EMR DBs from HIS.
 - Set `BACKUP_INCREMENTAL_CRON_produce=0 */6 * * *` for HIS `produce` only.
 
-Changing any cron / timezone setting requires a **backend restart** (jobs are registered at boot).
+Changing any **cron expression or timezone** still requires a **backend restart**
+(jobs are registered at boot from settings). Toggling `BACKUP_SCHEDULE_ENABLED`
+does not.
 
 ### Local / laptop sample mode
 

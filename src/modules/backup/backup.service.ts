@@ -17,8 +17,8 @@ import { loadState } from './engine/state';
 import { BackupDatabaseRunEntity } from './entities/backup-database-run.entity';
 import { BackupRunEntity } from './entities/backup-run.entity';
 import {
-  collectVolumeDiskStats,
-  type DiskVolumeStats,
+  collectBackupDiskUsage,
+  type IBackupDiskUsage,
 } from './disk-stats.util';
 import {
   aggregateHistoryByDay,
@@ -106,7 +106,7 @@ export type PublicOverviewResponse = {
     isolatedConfigured: boolean;
     freeHint: string | null;
   };
-  disks: DiskVolumeStats[];
+  disk: IBackupDiskUsage | null;
 };
 
 @Injectable()
@@ -370,11 +370,12 @@ export class BackupService {
   /** Read-only aggregate for the public TV wallboard. */
   async getPublicOverview(): Promise<PublicOverviewResponse> {
     const now = new Date();
-    const [sources, runs, zones, freshness] = await Promise.all([
+    const [sources, runs, zones, freshness, disk] = await Promise.all([
       this.listSources(),
       this.listRuns(PUBLIC_OVERVIEW_RUN_SAMPLE),
       this.getZones(),
       this.getFreshness(),
+      this.readDiskUsage(),
     ]);
 
     let scheduleEnabled: boolean | null = null;
@@ -453,12 +454,26 @@ export class BackupService {
         isolatedConfigured: Boolean(zones.isolatedCopy.configured),
         freeHint: zones.primary.freeHint,
       },
-      disks: collectVolumeDiskStats({
-        meta: zones.primary.volumes?.meta ?? zones.primary.backupDir ?? '',
-        his: zones.primary.volumes?.his ?? '',
-        emr: zones.primary.volumes?.emr ?? '',
-      }),
+      disk,
     };
+  }
+
+  private async readDiskUsage(): Promise<IBackupDiskUsage | null> {
+    try {
+      const settings = await this.backupConfig.getSettings();
+
+      return await collectBackupDiskUsage({
+        diskPath: settings.backupRoot ?? settings.backupDir,
+        metaPath: settings.backupDir,
+        volumePaths: [
+          settings.volumeDirs.HIS,
+          settings.volumeDirs.EMR,
+          settings.volumeDirs.LIS,
+        ],
+      });
+    } catch {
+      return null;
+    }
   }
 
   private findLatestDbRun(

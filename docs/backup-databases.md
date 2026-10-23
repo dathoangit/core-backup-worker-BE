@@ -353,11 +353,12 @@ ID window for incremental data: half-open **`(savedWatermark, captured]`** via `
 
 ### 9.8 Scheduler logic
 
-- `BACKUP_SCHEDULE_ENABLED` must be true (env at boot for registration + runtime settings check).
-- **Incremental:** dynamic `CronJob`s at `onModuleInit`, one job per **unique resolved cron**; each job passes `databases: […]` for that bucket.
-- Cron resolve order: per-DB → group (`BACKUP_HIS|EMR_INCREMENTAL_CRON`) → global `BACKUP_INCREMENTAL_CRON`.
-- **Full:** static `@Cron` for HIS and EMR groups separately.
-- Changing cron/timezone settings requires **backend restart**.
+- Cron jobs (incremental + weekly full) are **always registered** at `onModuleInit`.
+- At fire time, `runJob` skips unless `BACKUP_SCHEDULE_ENABLED` is true in settings (FE toggle; no restart).
+- **Incremental:** dynamic `CronJob`s, one job per **unique resolved cron**; each job passes `databases: […]` for that bucket.
+- Cron resolve order: per-DB → group (`BACKUP_HIS|EMR|LIS_INCREMENTAL_CRON`) → global `BACKUP_INCREMENTAL_CRON`.
+- **Full:** dynamic `CronJob`s for HIS / EMR / LIS from settings (`BACKUP_*_FULL_CRON`).
+- Changing cron/timezone settings requires **backend restart**; toggling enable does not.
 
 ### 9.9 Retention logic
 
