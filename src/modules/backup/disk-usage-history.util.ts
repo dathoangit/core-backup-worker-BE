@@ -103,8 +103,8 @@ export function computeDiskGrowthForecast(
     return { dailyGrowthBytes: null, estimatedDaysUntilFull: null };
   }
 
-  const oldest = samples[0];
-  const newest = samples.at(-1);
+  const oldest = samples[0]!;
+  const newest = samples.at(-1)!;
   const daySpan = Math.max(
     1,
     Math.round(
