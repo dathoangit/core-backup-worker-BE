@@ -18,13 +18,15 @@ import { BackupService } from '../backup/backup.service';
 import {
   getSettingDef,
   isAllowlistedSettingKey,
-  isPerDatabaseIncrementalCronKey,
   isRestartRequiredSettingKey,
   SETTING_KEY_DEFS,
   type SettingCategory,
   type SettingKeyDef,
 } from './settings.constants';
-import { DEFAULT_INCREMENTAL_CRON } from '../backup/incremental-schedule';
+import {
+  DEFAULT_INCREMENTAL_CRON,
+  isPerDatabaseIncrementalCronKey,
+} from '../backup/incremental-schedule';
 import { decryptSecret, encryptSecret } from './settings-crypto';
 import type {
   CreateSettingDto,
