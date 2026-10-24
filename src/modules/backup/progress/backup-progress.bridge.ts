@@ -6,8 +6,32 @@ import {
 } from '@nestjs/common';
 
 import { BackupEventsService } from '../events/backup-events.service';
+import { type BackupRunStatusEvent } from '../events/backup-events.types';
 import { BackupRedisService } from '../queue/backup-redis.service';
 import { type BackupProgressMessage } from './backup-progress.types';
+
+const STREAM_STATUSES = new Set<BackupRunStatusEvent['status']>([
+  'queued',
+  'running',
+  'cancelling',
+  'ok',
+  'partial',
+  'error',
+  'cancelled',
+]);
+
+function asStreamStatus(
+  status: string | undefined,
+): BackupRunStatusEvent['status'] | null {
+  if (
+    !status ||
+    !STREAM_STATUSES.has(status as BackupRunStatusEvent['status'])
+  ) {
+    return null;
+  }
+
+  return status as BackupRunStatusEvent['status'];
+}
 
 /**
  * API-side: fan Redis PubSub progress into in-process BackupEventsService for SSE.
@@ -73,9 +97,21 @@ export class BackupProgressBridge implements OnModuleInit, OnModuleDestroy {
       }
 
       case 'status': {
+        const status = asStreamStatus(message.status);
+
+        if (!status) {
+          this.logger.debug(
+            `Ignoring unknown progress status for ${message.runId}: ${
+              message.status ?? '(missing)'
+            }`,
+          );
+
+          break;
+        }
+
         this.backupEvents.emitStatus({
           runId: message.runId,
-          status: (message.status as 'running') || 'running',
+          status,
           at: message.at,
         });
 

@@ -19,6 +19,19 @@ const MAX_LOGS_PER_RUN = 500;
 const MAX_TRACKED_RUNS = 20;
 const HEARTBEAT_MS = 25_000;
 
+const TERMINAL_STATUSES = new Set<BackupRunStatusEvent['status']>([
+  'ok',
+  'partial',
+  'error',
+  'cancelled',
+]);
+
+function isTerminalStatus(
+  status: BackupRunStatusEvent['status'] | undefined | null,
+): boolean {
+  return Boolean(status && TERMINAL_STATUSES.has(status));
+}
+
 @Injectable()
 export class BackupEventsService implements OnModuleDestroy {
   private readonly subject = new Subject<BackupStreamEvent>();
@@ -35,13 +48,32 @@ export class BackupEventsService implements OnModuleDestroy {
   emit(event: BackupStreamEvent): void {
     switch (event.type) {
       case 'run.status': {
-        this.touchRun(event.runId).status = event;
+        const buffer = this.touchRun(event.runId);
+        buffer.status = event;
+
+        if (
+          (event.status === 'ok' || event.status === 'partial') &&
+          buffer.progress
+        ) {
+          buffer.progress = {
+            ...buffer.progress,
+            percent: 100,
+            etaSeconds: 0,
+            at: event.at,
+          };
+        }
 
         break;
       }
 
       case 'run.progress': {
-        this.touchRun(event.runId).progress = event;
+        const buffer = this.touchRun(event.runId);
+
+        if (isTerminalStatus(buffer.status?.status)) {
+          return;
+        }
+
+        buffer.progress = event;
 
         break;
       }

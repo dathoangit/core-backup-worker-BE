@@ -94,6 +94,7 @@ export interface PublicOverviewActiveJob {
   etaSeconds: number | null;
   currentDatabase: string | null;
   currentTable: string | null;
+  finishedAt: string | null;
 }
 
 export interface PublicOverviewScheduleTarget {
@@ -823,37 +824,70 @@ export class BackupService {
   private async resolveActiveJob(
     runs: BackupRunEntity[],
   ): Promise<PublicOverviewActiveJob | null> {
-    const running = runs.find((run) => run.status === 'running');
+    const selected =
+      runs.find((run) => run.status === 'running') ??
+      runs.find(
+        (run) =>
+          run.status === 'ok' ||
+          run.status === 'partial' ||
+          run.status === 'error' ||
+          run.status === 'cancelled',
+      );
 
-    if (!running) {
+    if (!selected) {
       return null;
     }
 
     const startedAt =
-      running.startedAt instanceof Date
-        ? running.startedAt.toISOString()
-        : String(running.startedAt);
-    let percent = 0;
+      selected.startedAt instanceof Date
+        ? selected.startedAt.toISOString()
+        : String(selected.startedAt);
+    const isRunning = selected.status === 'running';
+    const completedOk =
+      selected.status === 'ok' || selected.status === 'partial';
+    let percent = completedOk ? 100 : 0;
     let rowsProcessed = 0;
     let bytesProcessed = 0;
     let rowsPerSec = 0;
     let bytesPerSec = 0;
-    let etaSeconds: number | null = null;
+    let etaSeconds: number | null = completedOk ? 0 : null;
     let currentDatabase: string | null = null;
     let currentTable: string | null = null;
     let progressStartedAt: string | null = startedAt;
 
+    for (const db of selected.databases ?? []) {
+      const rows = Number(db.rowCountTotal ?? 0);
+      const bytes = Number(db.bytesTotal ?? 0);
+
+      if (Number.isFinite(rows) && rows > 0) {
+        rowsProcessed += rows;
+      }
+
+      if (Number.isFinite(bytes) && bytes > 0) {
+        bytesProcessed += bytes;
+      }
+
+      if (!currentDatabase) {
+        currentDatabase = db.database ?? null;
+      }
+    }
+
     if (this.backupRedis) {
       try {
-        const last = await this.backupRedis.getLastProgress(running.runId);
+        const last = await this.backupRedis.getLastProgress(selected.runId);
 
         if (last) {
-          percent = last.percent ?? percent;
+          if (isRunning) {
+            percent = last.percent ?? percent;
+            etaSeconds = last.etaSeconds ?? etaSeconds;
+            rowsPerSec = last.rowsPerSec ?? rowsPerSec;
+            bytesPerSec = last.bytesPerSec ?? bytesPerSec;
+          } else if (!completedOk) {
+            percent = last.percent ?? percent;
+          }
+
           rowsProcessed = last.rowsProcessed ?? rowsProcessed;
           bytesProcessed = last.bytesProcessed ?? bytesProcessed;
-          rowsPerSec = last.rowsPerSec ?? rowsPerSec;
-          bytesPerSec = last.bytesPerSec ?? bytesPerSec;
-          etaSeconds = last.etaSeconds ?? etaSeconds;
           currentDatabase = last.currentDatabase ?? currentDatabase;
           currentTable = last.currentTable ?? currentTable;
           progressStartedAt = last.startedAt ?? progressStartedAt;
@@ -863,10 +897,24 @@ export class BackupService {
       }
     }
 
+    if (completedOk) {
+      percent = 100;
+      etaSeconds = 0;
+    }
+
+    let finishedAt: string | null = null;
+
+    if (!isRunning && selected.finishedAt) {
+      const finished = new Date(selected.finishedAt);
+      finishedAt = Number.isNaN(finished.getTime())
+        ? null
+        : finished.toISOString();
+    }
+
     return {
-      runId: running.runId,
-      mode: running.mode,
-      status: 'running',
+      runId: selected.runId,
+      mode: selected.mode,
+      status: selected.status,
       startedAt: progressStartedAt,
       percent,
       rowsProcessed,
@@ -877,6 +925,7 @@ export class BackupService {
       etaSeconds,
       currentDatabase,
       currentTable,
+      finishedAt,
     };
   }
 
