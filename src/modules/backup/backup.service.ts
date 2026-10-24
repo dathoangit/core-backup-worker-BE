@@ -12,6 +12,10 @@ import { type Repository } from 'typeorm';
 
 import { BackupConfigService } from './backup-config.service';
 import {
+  type BackupLagState,
+  resolveBackupLagState,
+} from './backup-schedule-lag.util';
+import {
   collectBackupDiskUsage,
   type IBackupDiskUsage,
 } from './disk-stats.util';
@@ -27,6 +31,7 @@ import { BackupDatabaseRunEntity } from './entities/backup-database-run.entity';
 import { BackupRunEntity } from './entities/backup-run.entity';
 import { BackupCancelledError } from './errors/backup-cancelled.error';
 import { BackupEventsService } from './events/backup-events.service';
+import { DEFAULT_INCREMENTAL_CRON } from './incremental-schedule';
 import { type BackupRunProgressContext } from './progress/backup-run-progress.context';
 import {
   aggregateHistoryByDay,
@@ -78,6 +83,8 @@ export interface PublicOverviewDatabase {
   watermark: string | null;
   /** Minutes since lastStartedAt (backup freshness lag, not source tip lag). */
   lagMinutes: number | null;
+  /** Schedule-aware freshness vs incremental cron (not replication lag). */
+  lagState: BackupLagState;
 }
 
 export interface PublicOverviewActiveJob {
@@ -495,13 +502,16 @@ export class BackupService {
   /** Read-only aggregate for the public TV wallboard. */
   async getPublicOverview(): Promise<PublicOverviewResponse> {
     const now = new Date();
-    const [sources, runs, zones, freshness, schedule] = await Promise.all([
-      this.listSources(),
-      this.listRuns(PUBLIC_OVERVIEW_RUN_SAMPLE),
-      this.getZones(),
-      this.getFreshness(),
-      this.resolvePublicSchedule(),
-    ]);
+    const [sources, runs, zones, freshness, schedule, scheduleCronContext] =
+      await Promise.all([
+        this.listSources(),
+        this.listRuns(PUBLIC_OVERVIEW_RUN_SAMPLE),
+        this.getZones(),
+        this.getFreshness(),
+        this.resolvePublicSchedule(),
+        this.resolveIncrementalCronByDatabase(),
+      ]);
+    const { cronByDatabaseKey, timezone } = scheduleCronContext;
 
     const compression = estimateGzipCompression(
       this.collectCompressionSamples(runs),
@@ -514,6 +524,9 @@ export class BackupService {
       for (const database of source.databases) {
         const latest = this.findLatestDbRun(runs, source.group, database);
         const lagAnchor = latest?.finishedAt ?? latest?.startedAt ?? null;
+        const cronExpr =
+          cronByDatabaseKey.get(`${source.group}:${database}`) ??
+          DEFAULT_INCREMENTAL_CRON;
         databases.push({
           group: source.group,
           database,
@@ -526,6 +539,13 @@ export class BackupService {
           lastStartedAt: latest?.startedAt ?? null,
           watermark: source.watermarks[database] ?? null,
           lagMinutes: lagMinutesFromLastStartedAt(lagAnchor, now),
+          lagState: resolveBackupLagState({
+            lastOkAt: lagAnchor,
+            lastDbStatus: latest?.dbStatus ?? null,
+            cronExpr,
+            timezone,
+            now,
+          }),
         });
       }
 
@@ -542,6 +562,7 @@ export class BackupService {
           lastStartedAt: null,
           watermark: null,
           lagMinutes: null,
+          lagState: 'no_data',
         });
       }
     }
@@ -725,6 +746,36 @@ export class BackupService {
     }
 
     return total;
+  }
+
+  private async resolveIncrementalCronByDatabase(): Promise<{
+    cronByDatabaseKey: Map<string, string>;
+    timezone: string;
+  }> {
+    const cronByDatabaseKey = new Map<string, string>();
+    let timezone = 'Asia/Ho_Chi_Minh';
+
+    try {
+      const settings = await this.backupConfig.getSettings();
+      timezone = settings.timezone?.trim() || timezone;
+      const databases =
+        await this.backupConfig.listConfiguredScheduleDatabases();
+      const buckets =
+        await this.backupConfig.getIncrementalCronBuckets(databases);
+
+      for (const bucket of buckets) {
+        for (const entry of bucket.databases) {
+          cronByDatabaseKey.set(
+            `${entry.group}:${entry.database}`,
+            bucket.cron,
+          );
+        }
+      }
+    } catch {
+      // Wallboard still works with DEFAULT_INCREMENTAL_CRON per database.
+    }
+
+    return { cronByDatabaseKey, timezone };
   }
 
   private async resolvePublicSchedule(): Promise<PublicOverviewSchedule> {
