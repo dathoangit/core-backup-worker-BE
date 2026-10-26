@@ -20,6 +20,7 @@ import {
   parseWatermark,
   splitIdRange,
 } from '../checkpoint';
+import { compressedCsvExt } from '../compressed-writer';
 import {
   copyFullTable,
   copyQueryToGzipFile,
@@ -120,7 +121,9 @@ async function copyAppendChunks(options: {
       continue;
     }
 
-    const fileName = `${schema}.${table}.${range.fromExclusive}_${range.toInclusive}.csv.gz`;
+    const fileName = `${schema}.${table}.${range.fromExclusive}_${
+      range.toInclusive
+    }${compressedCsvExt()}`;
     const outputPath = path.join(outDir, fileName);
     const chunk = await copyTableChunk({
       client,
@@ -191,7 +194,7 @@ async function exportChangedBusinessRows(options: {
       .join(',\n');
     const deletesPath = path.join(
       outDir,
-      `deletes_${fromExclusive}_${toInclusive}.csv.gz`,
+      `deletes_${fromExclusive}_${toInclusive}${compressedCsvExt()}`,
     );
     const del = await copyQueryToGzipFile(
       client,
@@ -239,7 +242,7 @@ async function exportChangedBusinessRows(options: {
       const batch = recordIds.slice(i, i + batchSize);
       const file = path.join(
         outDir,
-        `patch_${physical}_${fromExclusive}_${toInclusive}_${i}.csv.gz`,
+        `patch_${physical}_${fromExclusive}_${toInclusive}_${i}${compressedCsvExt()}`,
       );
       const idList = batch.join(',');
       const result = await copyQueryToGzipFile(
@@ -314,16 +317,34 @@ async function fullDumpReadableTables(options: {
       continue;
     }
 
-    const outputPath = path.join(
-      outDir,
-      `${table.schema}.${table.table}.csv.gz`,
-    );
+    const qualified = `${table.schema}.${table.table}`;
+    const outputPath = path.join(outDir, `${qualified}${compressedCsvExt()}`);
+    progress?.onTableProgress({
+      database,
+      table: qualified,
+      tablesDone,
+      tablesTotal: workTables.length,
+      inFlight: true,
+    });
+
+    let reportedBytes = 0;
     const result = await copyFullTable({
       client,
       schema: table.schema,
       table: table.table,
       outputPath,
       rowLimit,
+      onBytes: (delta) => {
+        reportedBytes += delta;
+        progress?.onTableProgress({
+          database,
+          table: qualified,
+          tablesDone,
+          tablesTotal: workTables.length,
+          bytesDelta: delta,
+          inFlight: true,
+        });
+      },
     });
     chunks.push({
       key,
@@ -340,11 +361,12 @@ async function fullDumpReadableTables(options: {
     tablesDone += 1;
     progress?.onTableProgress({
       database,
-      table: `${table.schema}.${table.table}`,
+      table: qualified,
       tablesDone,
       tablesTotal: workTables.length,
       rowsDelta: Math.max(result.rowCount, 0),
-      bytesDelta: Math.max(result.bytes, 0),
+      bytesDelta: Math.max(result.bytes - reportedBytes, 0),
+      inFlight: false,
     });
   }
 

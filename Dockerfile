@@ -34,7 +34,7 @@ RUN yarn install --frozen-lockfile --production --network-timeout 600000 \
 # ---- runner ----
 FROM node:22-alpine AS runner
 
-RUN apk add --no-cache tzdata
+RUN apk add --no-cache tzdata zstd postgresql17-client
 
 ENV NODE_ENV=production \
     PORT=3000 \

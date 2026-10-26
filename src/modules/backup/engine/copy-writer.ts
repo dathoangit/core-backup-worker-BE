@@ -1,14 +1,11 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import path from 'node:path';
-import { Transform } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import { createGzip } from 'node:zlib';
 
 import { type Client } from 'pg';
 import { to as copyTo } from 'pg-copy-streams';
 
 import { type ChunkResult } from '../types';
+import { writeStreamToCompressedFile } from './compressed-writer';
 
 export function quoteIdent(ident: string): string {
   return `"${ident.replaceAll('"', '""')}"`;
@@ -22,10 +19,7 @@ export function qualifyTable(schema: string, table: string): string {
  * Wraps a SELECT so COPY only streams up to `rowLimit` rows.
  * Used for local/dev sample backups (BACKUP_DEV_ROW_LIMIT).
  */
-export function withDevRowLimit(
-  selectSql: string,
-  rowLimit: number | undefined,
-): string {
+export function withDevRowLimit(selectSql: string, rowLimit?: number): string {
   if (!rowLimit || rowLimit <= 0) {
     return selectSql;
   }
@@ -33,29 +27,6 @@ export function withDevRowLimit(
   return `SELECT * FROM (${selectSql}) AS _backup_dev_sample LIMIT ${Math.floor(
     rowLimit,
   )}`;
-}
-
-function createHashingTransform(): {
-  transform: Transform;
-  digests: () => { sha256: string; md5: string };
-} {
-  const sha256 = createHash('sha256');
-  const md5 = createHash('md5');
-  const transform = new Transform({
-    transform(chunk, _encoding, callback) {
-      sha256.update(chunk);
-      md5.update(chunk);
-      callback(null, chunk);
-    },
-  });
-
-  return {
-    transform,
-    digests: () => ({
-      sha256: sha256.digest('hex'),
-      md5: md5.digest('hex'),
-    }),
-  };
 }
 
 export async function hashFile(
@@ -80,41 +51,39 @@ export async function hashFile(
   };
 }
 
-export async function copyQueryToGzipFile(
+export async function copyQueryToCompressedFile(
   client: Client,
   selectSql: string,
   outputPath: string,
-  options?: { rowLimit?: number },
+  options?: {
+    rowLimit?: number;
+    onBytes?: (delta: number) => void;
+    signal?: AbortSignal;
+  },
 ): Promise<{ rowCount: number; bytes: number; sha256: string; md5: string }> {
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-
-  const tmpPath = `${outputPath}.partial`;
-
-  if (fs.existsSync(tmpPath)) {
-    fs.unlinkSync(tmpPath);
-  }
-
   const limitedSql = withDevRowLimit(selectSql, options?.rowLimit);
   const copySql = `COPY (${limitedSql}) TO STDOUT WITH (FORMAT csv, HEADER true, ENCODING 'UTF8')`;
   const copyStream = client.query(copyTo(copySql));
-  const gzip = createGzip({ level: 6 });
-  const hasher = createHashingTransform();
-  const out = fs.createWriteStream(tmpPath);
 
-  await pipeline(copyStream, gzip, hasher.transform, out);
-
-  const bytes = fs.statSync(tmpPath).size;
-  fs.renameSync(tmpPath, outputPath);
+  const { bytes, sha256, md5 } = await writeStreamToCompressedFile(
+    copyStream,
+    outputPath,
+    {
+      onBytes: options?.onBytes,
+      signal: options?.signal,
+    },
+  );
 
   const rowCount =
     typeof (copyStream as { rowCount?: number }).rowCount === 'number'
       ? (copyStream as { rowCount: number }).rowCount
       : -1;
 
-  const { sha256, md5 } = hasher.digests();
-
   return { rowCount, bytes, sha256, md5 };
 }
+
+/** @deprecated Use copyQueryToCompressedFile — kept for call-site compatibility. */
+export const copyQueryToGzipFile = copyQueryToCompressedFile;
 
 export async function copyTableChunk(options: {
   client: Client;
@@ -126,6 +95,7 @@ export async function copyTableChunk(options: {
   outputPath: string;
   chunkKey: string;
   rowLimit?: number;
+  signal?: AbortSignal;
 }): Promise<ChunkResult> {
   const {
     client,
@@ -137,6 +107,7 @@ export async function copyTableChunk(options: {
     outputPath,
     chunkKey,
     rowLimit,
+    signal,
   } = options;
 
   const sql = `
@@ -147,12 +118,13 @@ export async function copyTableChunk(options: {
     ORDER BY ${quoteIdent(idColumn)}
   `;
 
-  const { rowCount, bytes, sha256, md5 } = await copyQueryToGzipFile(
+  const { rowCount, bytes, sha256, md5 } = await copyQueryToCompressedFile(
     client,
     sql,
     outputPath,
     {
       rowLimit,
+      signal,
     },
   );
 
@@ -174,6 +146,8 @@ export async function copyFullTable(options: {
   table: string;
   outputPath: string;
   rowLimit?: number;
+  onBytes?: (delta: number) => void;
+  signal?: AbortSignal;
 }): Promise<{
   rowCount: number;
   bytes: number;
@@ -181,14 +155,17 @@ export async function copyFullTable(options: {
   sha256: string;
   md5: string;
 }> {
-  const { client, schema, table, outputPath, rowLimit } = options;
+  const { client, schema, table, outputPath, rowLimit, onBytes, signal } =
+    options;
   const sql = `SELECT * FROM ${qualifyTable(schema, table)}`;
-  const { rowCount, bytes, sha256, md5 } = await copyQueryToGzipFile(
+  const { rowCount, bytes, sha256, md5 } = await copyQueryToCompressedFile(
     client,
     sql,
     outputPath,
     {
       rowLimit,
+      onBytes,
+      signal,
     },
   );
 

@@ -1,9 +1,6 @@
-import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { Readable, Transform } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import { createGzip } from 'node:zlib';
+import { Readable } from 'node:stream';
 
 import sql from 'mssql';
 
@@ -19,6 +16,10 @@ import {
   type SourceConfig,
   type TableRef,
 } from '../../types';
+import {
+  compressedCsvExt,
+  writeStreamToCompressedFile,
+} from '../compressed-writer';
 import {
   beginOrResumePending,
   commitWatermark,
@@ -140,7 +141,7 @@ interface StreamExportResult {
   lastKeyValue: unknown | undefined;
 }
 
-async function streamQueryToGzip(options: {
+async function streamQueryToCompressed(options: {
   pool: sql.ConnectionPool;
   query: string;
   outputPath: string;
@@ -195,53 +196,44 @@ async function streamQueryToGzip(options: {
     readable.push(null);
   });
 
-  const gzip = createGzip({ level: 6 });
-  const sha256 = createHash('sha256');
-  const md5 = createHash('md5');
-  const hasher = new Transform({
-    transform(chunk, _encoding, callback) {
-      sha256.update(chunk);
-      md5.update(chunk);
-      callback(null, chunk);
-    },
-  });
-  const out = fs.createWriteStream(tmpPath);
-
   try {
-    await Promise.all([
-      pipeline(readable, gzip, hasher, out),
+    const [compressed] = await Promise.all([
+      writeStreamToCompressedFile(readable, outputPath),
       request.query(query),
     ]);
+
+    if (rowCount === 0) {
+      if (fs.existsSync(outputPath)) {
+        fs.unlinkSync(outputPath);
+      }
+
+      return {
+        rowCount: 0,
+        bytes: 0,
+        sha256: '',
+        md5: '',
+        lastKeyValue: undefined,
+      };
+    }
+
+    return {
+      rowCount,
+      bytes: compressed.bytes,
+      sha256: compressed.sha256,
+      md5: compressed.md5,
+      lastKeyValue,
+    };
   } catch (error) {
     if (fs.existsSync(tmpPath)) {
       fs.unlinkSync(tmpPath);
     }
 
+    if (fs.existsSync(outputPath)) {
+      fs.unlinkSync(outputPath);
+    }
+
     throw error;
   }
-
-  if (rowCount === 0) {
-    fs.unlinkSync(tmpPath);
-
-    return {
-      rowCount: 0,
-      bytes: 0,
-      sha256: '',
-      md5: '',
-      lastKeyValue: undefined,
-    };
-  }
-
-  const bytes = fs.statSync(tmpPath).size;
-  fs.renameSync(tmpPath, outputPath);
-
-  return {
-    rowCount,
-    bytes,
-    sha256: sha256.digest('hex'),
-    md5: md5.digest('hex'),
-    lastKeyValue,
-  };
 }
 
 function sqlLiteral(value: unknown): string {
@@ -428,7 +420,10 @@ export async function backupMssqlSnapshot(options: {
 
             const outputPath = path.join(
               outDir,
-              `${qualified}.${String(nextSeq).padStart(6, '0')}.csv.gz`,
+              `${qualified}.${String(nextSeq).padStart(
+                6,
+                '0',
+              )}${compressedCsvExt()}`,
             );
 
             const spidResult = await pool
@@ -436,7 +431,7 @@ export async function backupMssqlSnapshot(options: {
               .query('SELECT @@SPID AS spid');
             activeSpid = Number(spidResult.recordset[0]?.spid) || null;
 
-            const exported = await streamQueryToGzip({
+            const exported = await streamQueryToCompressed({
               pool,
               query,
               outputPath,
@@ -500,7 +495,10 @@ export async function backupMssqlSnapshot(options: {
             'warn',
           );
 
-          const outputPath = path.join(outDir, `${qualified}.csv.gz`);
+          const outputPath = path.join(
+            outDir,
+            `${qualified}${compressedCsvExt()}`,
+          );
           const limit =
             rowLimit && rowLimit > 0 ? `TOP (${Math.floor(rowLimit)}) ` : '';
           const query = `SELECT ${limit}* FROM ${quoteIdent(
@@ -512,7 +510,7 @@ export async function backupMssqlSnapshot(options: {
             .query('SELECT @@SPID AS spid');
           activeSpid = Number(spidResult.recordset[0]?.spid) || null;
 
-          const exported = await streamQueryToGzip({
+          const exported = await streamQueryToCompressed({
             pool,
             query,
             outputPath,

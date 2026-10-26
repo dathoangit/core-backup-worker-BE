@@ -1,6 +1,6 @@
 #!/bin/sh
-
-TAG=test-$(date +'%m.%d.%Y')
-
-git push origin HEAD:refs/tags/$TAG
-git push --delete origin $TAG
+# Production deploy entrypoint on xp-cntt-server.
+# Delegates to scripts/deploy-prod.sh (uses .env; requires NODE_ENV=production).
+set -eu
+cd "$(dirname "$0")"
+exec ./scripts/deploy-prod.sh "$@"

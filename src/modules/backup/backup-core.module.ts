@@ -6,6 +6,7 @@ import { SettingsModule } from '../settings/settings.module';
 import { BackupService } from './backup.service';
 import { BackupConfigService } from './backup-config.service';
 import { BackupRunnerService } from './engine/backup-runner.service';
+import { CompressionShutdownService } from './engine/compression-shutdown.service';
 import { BackupDatabaseRunEntity } from './entities/backup-database-run.entity';
 import { BackupRunEntity } from './entities/backup-run.entity';
 import { BackupEventsService } from './events/backup-events.service';
@@ -38,6 +39,7 @@ import { RetentionService } from './zones/retention.service';
     BackupRunnerService,
     PrimaryZoneService,
     RetentionService,
+    CompressionShutdownService,
     RestorePlanService,
     BackupEventsService,
     BackupProgressPublisher,
@@ -58,6 +60,7 @@ import { RetentionService } from './zones/retention.service';
     BackupRunnerService,
     PrimaryZoneService,
     RetentionService,
+    CompressionShutdownService,
     RestorePlanService,
     BackupEventsService,
     BackupProgressPublisher,

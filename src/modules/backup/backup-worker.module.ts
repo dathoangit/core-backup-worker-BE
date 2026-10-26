@@ -4,6 +4,7 @@ import { ConfigModule } from '@nestjs/config';
 import { BackupService } from './backup.service';
 import { BackupConfigService } from './backup-config.service';
 import { BackupRunnerService } from './engine/backup-runner.service';
+import { CompressionShutdownService } from './engine/compression-shutdown.service';
 import { BackupCancelRegistry } from './queue/backup-cancel.registry';
 import { SourceRegistry } from './source-registry';
 import { ARCHIVE_TARGET } from './zones/archive-target.interface';
@@ -33,6 +34,7 @@ import { RetentionService } from './zones/retention.service';
     BackupRunnerService,
     PrimaryZoneService,
     RetentionService,
+    CompressionShutdownService,
     RestorePlanService,
     BackupService,
     NoopArchiveTarget,

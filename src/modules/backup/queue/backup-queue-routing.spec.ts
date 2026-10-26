@@ -13,4 +13,15 @@ describe('backup queue routing', () => {
     expect(BACKUP_FULL_QUEUE_NAME).toBe('queue-full');
     expect(BACKUP_INCREMENTAL_PRIORITY).toBeLessThan(BACKUP_FULL_PRIORITY);
   });
+
+  it('routes logical mode to the full queue (non-incremental)', () => {
+    const queueForMode = (mode: 'incremental' | 'full' | 'logical') =>
+      mode === 'incremental'
+        ? BACKUP_INCREMENTAL_QUEUE_NAME
+        : BACKUP_FULL_QUEUE_NAME;
+
+    expect(queueForMode('logical')).toBe(BACKUP_FULL_QUEUE_NAME);
+    expect(queueForMode('full')).toBe(BACKUP_FULL_QUEUE_NAME);
+    expect(queueForMode('incremental')).toBe(BACKUP_INCREMENTAL_QUEUE_NAME);
+  });
 });

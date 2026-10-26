@@ -72,6 +72,19 @@ export const SETTING_KEY_DEFS: SettingKeyDef[] = [
   { key: 'BACKUP_STATEMENT_TIMEOUT_MS', category: 'backup', isSecret: false },
   /** Cap rows per COPY for local sample dumps; 0 = unlimited (production). */
   { key: 'BACKUP_DEV_ROW_LIMIT', category: 'backup', isSecret: false },
+  { key: 'BACKUP_COMPRESSION', category: 'backup', isSecret: false },
+  { key: 'BACKUP_ZSTD_LEVEL', category: 'backup', isSecret: false },
+  { key: 'BACKUP_ZSTD_THREADS', category: 'backup', isSecret: false },
+  { key: 'BACKUP_VERIFY_ARCHIVE', category: 'backup', isSecret: false },
+  { key: 'BACKUP_MIN_FREE_GB', category: 'backup', isSecret: false },
+  { key: 'BACKUP_HIS_LOGICAL_CRON', category: 'his', isSecret: false },
+  { key: 'BACKUP_EMR_LOGICAL_CRON', category: 'emr', isSecret: false },
+  { key: 'BACKUP_LOGICAL_JOBS', category: 'backup', isSecret: false },
+  {
+    key: 'BACKUP_LOGICAL_EXCLUDE_TABLE_DATA',
+    category: 'backup',
+    isSecret: false,
+  },
   // his
   { key: 'BACKUP_HIS_INCREMENTAL_CRON', category: 'his', isSecret: false },
   { key: 'BACKUP_HIS_FULL_CRON', category: 'his', isSecret: false },

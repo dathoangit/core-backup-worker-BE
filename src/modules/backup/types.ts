@@ -2,7 +2,7 @@ export type SourceGroup = 'HIS' | 'EMR' | 'BADL' | 'LIS' | 'PACS';
 
 export type BackupProfile = 'adempiere' | 'envers' | 'snapshot';
 
-export type BackupMode = 'incremental' | 'full';
+export type BackupMode = 'incremental' | 'full' | 'logical';
 
 export type SourceReachability = 'ready' | 'unreachable' | 'unconfigured';
 
@@ -44,6 +44,13 @@ export interface BackupConfig {
    * Production must keep this at 0.
    */
   devRowLimit: number;
+  compression: 'zstd' | 'gzip';
+  zstdLevel: number;
+  zstdThreads: number;
+  verifyArchive: boolean;
+  minFreeBytes: number;
+  logicalJobs: number;
+  logicalExcludeTableData: string[];
 }
 
 export interface PendingState {

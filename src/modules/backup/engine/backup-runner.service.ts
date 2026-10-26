@@ -1,7 +1,10 @@
+import path from 'node:path';
+
 import { Injectable, Logger } from '@nestjs/common';
 import { Client } from 'pg';
 
 import { volumeDirForGroup } from '../backup-paths';
+import { ensureMinFreeSpace } from '../disk-stats.util';
 import { BackupCancelledError } from '../errors/backup-cancelled.error';
 import {
   type BackupRunProgressContext,
@@ -14,6 +17,7 @@ import {
   type RunManifest,
   type SourceConfig,
 } from '../types';
+import { setDefaultCompressionSettings } from './compressed-writer';
 import {
   acquireDatabaseLock,
   databaseLockFileName,
@@ -28,6 +32,9 @@ import {
 import { backupAdempiereDatabase } from './profiles/adempiere.profile';
 import { backupEnversDatabase } from './profiles/envers.profile';
 import { backupMssqlSnapshot } from './profiles/mssql-snapshot.profile';
+import { backupPgLogicalDump } from './profiles/pg-logical-dump.profile';
+import { dumpPostgresSchema } from './schema-dump';
+import { writeDatabaseSha256Sums } from './sha256sums';
 
 @Injectable()
 export class BackupRunnerService {
@@ -55,6 +62,17 @@ export class BackupRunnerService {
 
     for (const root of manifestRoots) {
       ensureRunDir(root, runId);
+    }
+
+    setDefaultCompressionSettings({
+      codec: config.compression,
+      level: config.zstdLevel,
+      threads: config.zstdThreads,
+      verify: config.verifyArchive,
+    });
+
+    for (const root of manifestRoots) {
+      ensureMinFreeSpace(root, config.minFreeBytes);
     }
 
     const workItems: Array<{ source: SourceConfig; database: string }> = [];
@@ -297,8 +315,37 @@ export class BackupRunnerService {
     let unregisterKiller: (() => void) | null = null;
 
     try {
+      if (mode === 'logical') {
+        if (source.group === 'LIS') {
+          return {
+            database,
+            group: source.group,
+            profile: 'snapshot',
+            status: 'skipped',
+            watermarkBefore: null,
+            captured: null,
+            watermarkAfter: null,
+            chunks: [],
+            skippedTables: [],
+            error: 'logical dump not supported for LIS/MSSQL',
+          };
+        }
+
+        return await backupPgLogicalDump({
+          source,
+          database,
+          backupDir: volumeDir,
+          runId,
+          jobs: config.logicalJobs,
+          excludeTableData: config.logicalExcludeTableData,
+          preferredSchemas: source.group === 'HIS' ? ['adempiere'] : undefined,
+          signal,
+          progress: sink,
+        });
+      }
+
       if (source.group === 'LIS') {
-        return await backupMssqlSnapshot({
+        const lisResult = await backupMssqlSnapshot({
           source,
           database,
           backupDir: volumeDir,
@@ -310,6 +357,8 @@ export class BackupRunnerService {
           progress: sink,
           cancelRegistry: this.cancelRegistry,
         });
+
+        return this.withSha256Sums(volumeDir, runId, database, lisResult);
       }
 
       const connected = await this.connectSource(
@@ -322,7 +371,27 @@ export class BackupRunnerService {
       unregisterKiller = connected.unregisterKiller;
 
       if (source.group === 'HIS' && database === 'produce') {
-        return await backupAdempiereDatabase({
+        if (mode === 'full') {
+          await dumpPostgresSchema({
+            host: source.host,
+            port: source.port,
+            user: source.user,
+            password: source.password,
+            database,
+            schemas: ['adempiere'],
+            outputPath: path.join(
+              volumeDir,
+              'runs',
+              runId,
+              database,
+              'schema',
+              'schema.sql.zst',
+            ),
+            signal,
+          });
+        }
+
+        const hisResult = await backupAdempiereDatabase({
           client,
           source,
           database,
@@ -334,10 +403,32 @@ export class BackupRunnerService {
           signal,
           progress: sink,
         });
+
+        return this.withSha256Sums(volumeDir, runId, database, hisResult);
       }
 
       if (source.group === 'EMR' || source.group === 'BADL') {
-        return await backupEnversDatabase({
+        if (mode === 'full') {
+          await dumpPostgresSchema({
+            host: source.host,
+            port: source.port,
+            user: source.user,
+            password: source.password,
+            database,
+            schemas: undefined,
+            outputPath: path.join(
+              volumeDir,
+              'runs',
+              runId,
+              database,
+              'schema',
+              'schema.sql.zst',
+            ),
+            signal,
+          });
+        }
+
+        const emrResult = await backupEnversDatabase({
           client,
           source,
           database,
@@ -349,6 +440,8 @@ export class BackupRunnerService {
           signal,
           progress: sink,
         });
+
+        return this.withSha256Sums(volumeDir, runId, database, emrResult);
       }
 
       return {
@@ -404,5 +497,29 @@ export class BackupRunnerService {
         }
       }
     }
+  }
+
+  private async withSha256Sums(
+    volumeDir: string,
+    runId: string,
+    database: string,
+    result: DatabaseRunResult,
+  ): Promise<DatabaseRunResult> {
+    if (result.status === 'ok') {
+      try {
+        await writeDatabaseSha256Sums(
+          path.join(volumeDir, 'runs', runId, database),
+          result,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `run=${runId} SHA256SUMS write failed for ${database}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+
+    return result;
   }
 }

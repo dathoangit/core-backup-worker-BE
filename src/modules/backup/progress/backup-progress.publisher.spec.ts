@@ -88,4 +88,79 @@ describe('BackupProgressPublisher', () => {
     expect(progress?.etaSeconds).not.toBeNull();
     expect(typeof progress?.startedAt).toBe('string');
   });
+
+  it('floors percent at 1 once work starts across many databases', async () => {
+    const published: Array<Record<string, unknown>> = [];
+    const backupRedis = {
+      publishProgress: jest.fn((message: Record<string, unknown>) => {
+        published.push(message);
+
+        return Promise.resolve();
+      }),
+    };
+
+    const publisher = new BackupProgressPublisher(backupRedis as never);
+    publisher.begin('run-3', 12);
+    publisher.setDbIndex('run-3', 0, 'produce');
+
+    const sink = publisher.sinkFor('run-3');
+    sink.onTableProgress({
+      database: 'produce',
+      table: 'adempiere.ad_attachment',
+      tablesDone: 0,
+      tablesTotal: 2000,
+      bytesDelta: 1024,
+      inFlight: true,
+    });
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+    });
+
+    const progress = published.find((m) => m.type === 'progress');
+    expect(progress?.percent).toBe(1);
+    expect(progress?.currentTable).toBe('adempiere.ad_attachment');
+    expect(progress?.bytesProcessed).toBe(1024);
+    // Floored 1% must not drive a ~99× elapsed ETA.
+    expect(progress?.etaSeconds).toBeNull();
+  });
+
+  it('flushes immediately when the active table changes', async () => {
+    const published: Array<Record<string, unknown>> = [];
+    const backupRedis = {
+      publishProgress: jest.fn((message: Record<string, unknown>) => {
+        published.push(message);
+
+        return Promise.resolve();
+      }),
+    };
+
+    const publisher = new BackupProgressPublisher(backupRedis as never);
+    publisher.begin('run-4', 1);
+    publisher.setDbIndex('run-4', 0, 'produce');
+    const sink = publisher.sinkFor('run-4');
+
+    sink.onTableProgress({
+      database: 'produce',
+      table: 'a',
+      tablesDone: 0,
+      tablesTotal: 10,
+      inFlight: true,
+    });
+    sink.onTableProgress({
+      database: 'produce',
+      table: 'b',
+      tablesDone: 1,
+      tablesTotal: 10,
+      inFlight: true,
+    });
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+    });
+
+    const progressEvents = published.filter((m) => m.type === 'progress');
+    expect(progressEvents.length).toBeGreaterThanOrEqual(2);
+    expect(progressEvents.at(-1)?.currentTable).toBe('b');
+  });
 });

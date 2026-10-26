@@ -6,7 +6,6 @@ services:
     restart: unless-stopped
     command: ['node', 'dist/main.js']
     env_file:
-      # Infrastructure only (DB, Redis, JWT, SETTINGS_SECRET_KEY). See .env.production.example.
       - .env
     environment:
       # First boot seeds app_settings from this file (encrypts *_PASSWORD). Optional after seed.

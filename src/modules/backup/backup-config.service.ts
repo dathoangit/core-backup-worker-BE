@@ -49,6 +49,15 @@ export interface BackupModuleSettings {
   archiveTarget: 'none' | 'filesystem' | 's3';
   /** 0 = production (no row cap). >0 = local sample dumps. */
   devRowLimit: number;
+  compression: 'zstd' | 'gzip';
+  zstdLevel: number;
+  zstdThreads: number;
+  verifyArchive: boolean;
+  minFreeBytes: number;
+  hisLogicalCron: string;
+  emrLogicalCron: string;
+  logicalJobs: number;
+  logicalExcludeTableData: string[];
 }
 
 @Injectable()
@@ -106,6 +115,21 @@ export class BackupConfigService {
       ),
       archiveTarget,
       devRowLimit: applyDevRowLimitPolicy(rawDevLimit, isDev),
+      compression: await this.readCompressionCodec(),
+      zstdLevel: await this.optionalInt('BACKUP_ZSTD_LEVEL', 3),
+      zstdThreads: await this.optionalInt('BACKUP_ZSTD_THREADS', 4),
+      verifyArchive: await this.truthy('BACKUP_VERIFY_ARCHIVE', true),
+      minFreeBytes:
+        (await this.optionalInt('BACKUP_MIN_FREE_GB', 50)) * 1024 ** 3,
+      hisLogicalCron:
+        (await this.read('BACKUP_HIS_LOGICAL_CRON')) ?? '0 4 * * 0',
+      emrLogicalCron:
+        (await this.read('BACKUP_EMR_LOGICAL_CRON')) ?? '0 5 * * 0',
+      logicalJobs: await this.optionalInt('BACKUP_LOGICAL_JOBS', 4),
+      logicalExcludeTableData: this.splitCsv(
+        (await this.read('BACKUP_LOGICAL_EXCLUDE_TABLE_DATA')) ??
+          'adempiere.ad_changelog',
+      ),
     };
   }
 
@@ -200,6 +224,43 @@ export class BackupConfigService {
         Number.isFinite(rawDevLimit as number) ? rawDevLimit : undefined,
         isDev,
       ),
+      compression: this.readCompressionCodecSync(),
+      zstdLevel:
+        Number.parseInt(
+          this.configService.get<string>('BACKUP_ZSTD_LEVEL') ?? '3',
+          10,
+        ) || 3,
+      zstdThreads:
+        Number.parseInt(
+          this.configService.get<string>('BACKUP_ZSTD_THREADS') ?? '4',
+          10,
+        ) || 4,
+      verifyArchive: !['0', 'false', 'no', 'off'].includes(
+        (
+          this.configService.get<string>('BACKUP_VERIFY_ARCHIVE') ?? 'true'
+        ).toLowerCase(),
+      ),
+      minFreeBytes:
+        (Number.parseInt(
+          this.configService.get<string>('BACKUP_MIN_FREE_GB') ?? '50',
+          10,
+        ) || 50) *
+        1024 ** 3,
+      hisLogicalCron:
+        this.configService.get<string>('BACKUP_HIS_LOGICAL_CRON') ??
+        '0 4 * * 0',
+      emrLogicalCron:
+        this.configService.get<string>('BACKUP_EMR_LOGICAL_CRON') ??
+        '0 5 * * 0',
+      logicalJobs:
+        Number.parseInt(
+          this.configService.get<string>('BACKUP_LOGICAL_JOBS') ?? '4',
+          10,
+        ) || 4,
+      logicalExcludeTableData: this.splitCsv(
+        this.configService.get<string>('BACKUP_LOGICAL_EXCLUDE_TABLE_DATA') ??
+          'adempiere.ad_changelog',
+      ),
     };
   }
 
@@ -283,6 +344,13 @@ export class BackupConfigService {
       statementTimeoutMs: settings.statementTimeoutMs,
       mode,
       devRowLimit: settings.devRowLimit,
+      compression: settings.compression,
+      zstdLevel: settings.zstdLevel,
+      zstdThreads: settings.zstdThreads,
+      verifyArchive: settings.verifyArchive,
+      minFreeBytes: settings.minFreeBytes,
+      logicalJobs: settings.logicalJobs,
+      logicalExcludeTableData: settings.logicalExcludeTableData,
     };
   }
 
@@ -427,5 +495,21 @@ export class BackupConfigService {
     }
 
     return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
+  }
+
+  private async readCompressionCodec(): Promise<'zstd' | 'gzip'> {
+    const raw = (
+      (await this.read('BACKUP_COMPRESSION')) ?? 'zstd'
+    ).toLowerCase();
+
+    return raw === 'gzip' ? 'gzip' : 'zstd';
+  }
+
+  private readCompressionCodecSync(): 'zstd' | 'gzip' {
+    const raw = (
+      this.configService.get<string>('BACKUP_COMPRESSION') ?? 'zstd'
+    ).toLowerCase();
+
+    return raw === 'gzip' ? 'gzip' : 'zstd';
   }
 }

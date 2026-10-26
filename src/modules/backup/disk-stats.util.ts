@@ -396,3 +396,23 @@ export function formatBytesShort(bytes: number): string {
 
   return `${value.toFixed(digits)} ${units[unit]}`;
 }
+
+export function ensureMinFreeSpace(
+  dirPath: string,
+  requiredBytes: number,
+): void {
+  const stats = readStatFs(dirPath);
+
+  if (!stats) {
+    throw new Error(`Cannot stat filesystem for free space at [${dirPath}]`);
+  }
+
+  if (stats.availableBytes < requiredBytes) {
+    const availGB = (stats.availableBytes / 1024 ** 3).toFixed(2);
+    const reqGB = (requiredBytes / 1024 ** 3).toFixed(2);
+
+    throw new Error(
+      `Insufficient free disk space at [${dirPath}]: available ${availGB} GB, required ${reqGB} GB.`,
+    );
+  }
+}

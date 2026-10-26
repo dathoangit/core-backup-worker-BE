@@ -123,8 +123,9 @@ What happens:
 
 ## Settings in app DB
 
-Runtime `.env` / `.env.production` stay **infrastructure-only**: `NODE_ENV`, `PORT`,
-JWT keys, `DB_*`, Redis, `SETTINGS_SECRET_KEY`, `SETTINGS_SEED_FILE`.
+Runtime `.env` stays **infrastructure-only**: `NODE_ENV`, `PORT`, JWT keys, `DB_*`,
+Redis, `SETTINGS_SECRET_KEY`, `SETTINGS_SEED_FILE`. On this server keep
+`NODE_ENV=production` and `BACKUP_DEV_ROW_LIMIT=0` (development forces sample LIMIT 100).
 
 All backup config (`BACKUP_*` volumes/cron/retention, `HIS_*` / `EMR_*` / `LIS_*` /
 `BADL_*`, alerts) lives in `app_settings`. Runtime reads **DB first**. Secrets
@@ -132,10 +133,10 @@ All backup config (`BACKUP_*` volumes/cron/retention, `HIS_*` / `EMR_*` / `LIS_*
 
 ### Fresh production deploy
 
-1. Copy `.env.production.example` → `.env.production` (fill DB/Redis/JWT/`SETTINGS_SECRET_KEY`).
+1. Copy `.env.example` → `.env` (fill DB/Redis/JWT/`SETTINGS_SECRET_KEY`; set `NODE_ENV=production`).
 2. Copy `.env.settings.example` → `.env.settings` (fill source passwords + confirm volumes).
-3. `docker compose up` — first boot with an empty `app_settings` table seeds from
-   `.env.settings` (see `SETTINGS_SEED_FILE`) and encrypts passwords.
+3. `./deploy.sh` (or `docker compose up`) — first boot with an empty `app_settings` table
+   seeds from `.env.settings` (see `SETTINGS_SEED_FILE`) and encrypts passwords.
 4. Optional: delete `.env.settings` from the host after a successful seed; further
    edits via FE **Cấu hình** (`/config`).
 
@@ -231,14 +232,16 @@ only holds the Docker runtime and rotated container logs. MySQL (app DB) and Red
 
 ```bash
 cd core-backup-worker-BE
-cp .env.production.example .env.production   # fill passwords, JWT keys, DB/Redis hosts
-./scripts/deploy-prod.sh
+cp .env.example .env                 # fill JWT, DB/Redis, SETTINGS_SECRET_KEY; NODE_ENV=production
+cp .env.settings.example .env.settings  # fill HIS/EMR/LIS passwords + volumes (first boot)
+./deploy.sh
 ```
 
-`scripts/deploy-prod.sh` refuses to run unless `/mnt/5AE4E9F5E4E9D375` is a real mount
-point, `BACKUP_DEV_ROW_LIMIT=0`, and `.env.production` exists. It creates
+`./deploy.sh` / `scripts/deploy-prod.sh` refuse to run unless `/mnt/5AE4E9F5E4E9D375` is a
+real mount point and `.env` has `NODE_ENV=production` (development forces sample
+`BACKUP_DEV_ROW_LIMIT=100`). Compose loads `.env` only. It creates
 `backup-storage/{meta,his,emr,lis}`, gives them to uid `1000` (the `node` user inside
-the image), then runs `docker compose build --pull && docker compose up -d`.
+the image), then runs `docker compose --env-file .env build/up`.
 
 Notes:
 
@@ -257,18 +260,17 @@ Notes:
 Use when you want every source credential ready immediately after boot (no FE password
 entry). **Do this before** `docker compose up`:
 
-1. Fill `.env.production` completely — `HIS_*` / `EMR_*` / `LIS_*` passwords must be
-   non-empty; paths `BACKUP_ROOT=/app/backup-storage` + volume dirs; `BACKUP_DEV_ROW_LIMIT=0`;
-   `DB_*`, Redis, JWT, `SETTINGS_SECRET_KEY`.
-2. Drop/recreate the app MySQL database (e.g. `his-raw-backup`).
+1. Fill `.env` (`NODE_ENV=production`, `BACKUP_DEV_ROW_LIMIT=0`, `DB_*`, Redis, JWT,
+   `SETTINGS_SECRET_KEY`) and `.env.settings` (HIS/EMR/LIS passwords + volumes).
+2. Drop/recreate the app database if you need a clean settings seed.
 3. `docker compose down` (BE + FE as needed). Optional: remove stale
    `/mnt/5AE4E9F5E4E9D375/backup-storage/meta/backup.lock`.
-4. Pull latest code → `./scripts/deploy-prod.sh` (BE), then FE deploy script.
+4. Pull latest code → `./deploy.sh` (BE), then FE deploy script.
 5. Confirm logs contain `Seeded N settings from env`. FE Databases should show HIS/EMR/LIS
    as `ready` (BADL may stay `unreachable`). Click **Start** on a single DB to verify.
 
 If passwords were empty at first seed, either wipe again with a full env, use FE **Sửa**
-on the missing secret keys, or `yarn settings:sync-from-env -- --env-file=.env.production --force`.
+on the missing secret keys, or `yarn settings:sync-from-env -- --env-file=.env.settings --force`.
 
 ### Windows Task Scheduler alternative
 
@@ -314,3 +316,43 @@ yarn backup:test
 
 Binary files outside PostgreSQL, `isofh_pay`, `produce_old` / `produce_bak`, restore
 execution, BADL until reachable, LIS/PACS, EMR file hồ sơ, real isolated-copy adapters.
+
+## Zstd CSV restore & logical dump (2026-10)
+
+### Verify artifact
+
+```bash
+cd /path/to/runs/<runId>/<database>
+sha256sum -c SHA256SUMS
+zstd -t full/some_table.csv.zst
+```
+
+### Restore one CSV table (zstd)
+
+```bash
+zstd -dc full/adempiere.ad_user.csv.zst | psql -h localhost -U postgres -d app_db_recovery -c "\copy adempiere.ad_user FROM STDIN WITH (FORMAT csv, HEADER true)"
+```
+
+Legacy gzip files still work:
+
+```bash
+gzip -dc full/adempiere.ad_user.csv.gz | psql ... -c "\copy ..."
+```
+
+### Restore weekly logical dump (parallel)
+
+```bash
+pg_restore -Fd -j 4 -d app_db_recovery /path/to/runs/<runId>/<database>/logical
+```
+
+Schema-only dump from full runs (when present):
+
+```bash
+zstd -dc schema/schema.sql.zst | psql -h localhost -U postgres -d app_db_recovery -v ON_ERROR_STOP=1
+```
+
+### Monthly restore drill
+
+1. Spin up a temporary Postgres container.
+2. Restore schema + a sample of CSV tables (or logical dump).
+3. Record wall-clock time (RTO) and row counts for core tables.

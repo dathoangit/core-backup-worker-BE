@@ -10,7 +10,7 @@ import { PrimaryZoneService } from '../zones/primary-zone.service';
 
 const TZ = 'Asia/Ho_Chi_Minh';
 
-export type BackupFileKind = 'full' | 'append' | 'cdc' | 'snapshot';
+export type BackupFileKind = 'full' | 'append' | 'cdc' | 'snapshot' | 'logical';
 
 export interface BackupFileEntry {
   relativePath: string;
@@ -282,6 +282,10 @@ export class BackupFilesService {
 
     if (normalized.includes('/snapshots/')) {
       return 'snapshot';
+    }
+
+    if (normalized.includes('/logical/')) {
+      return 'logical';
     }
 
     if (normalized.includes('/append/')) {

@@ -209,7 +209,7 @@ Databases sharing the same resolved cron run in one job (avoids lock contention)
 
 | | `yarn dev` (`NODE_ENV=development`) | `yarn start` / production |
 | --- | --- | --- |
-| Env files | `.env.development` then `.env` | `.env.production` (optional) then `.env` |
+| Env files | `.env.development` then `.env` | `.env` (`NODE_ENV=production`) |
 | Default root | repo `.backup-dev` via `BACKUP_ROOT=../.backup-dev` | Must set absolute `BACKUP_VOLUME_*` (and/or `BACKUP_ROOT`) |
 | `BACKUP_DEV_ROW_LIMIT` | Default `100` if unset; **must be > 0** | Default `0`; **must be 0** (sample dumps refused) |
 | Schedule | Usually `BACKUP_SCHEDULE_ENABLED=false` | Per real ops config |

@@ -19,6 +19,7 @@ interface RunProgressState {
   currentTable?: string;
   tablesDone: number;
   tablesTotal: number;
+  tableInFlight: boolean;
   percent: number;
   rowsPerSec: number;
   bytesPerSec: number;
@@ -48,6 +49,7 @@ export class BackupProgressPublisher {
       startedAtIso: new Date(now).toISOString(),
       tablesDone: 0,
       tablesTotal: 0,
+      tableInFlight: false,
       percent: 0,
       rowsPerSec: 0,
       bytesPerSec: 0,
@@ -78,6 +80,7 @@ export class BackupProgressPublisher {
     state.currentTable = undefined;
     state.tablesDone = 0;
     state.tablesTotal = 0;
+    state.tableInFlight = false;
   }
 
   end(runId: string): void {
@@ -144,10 +147,12 @@ export class BackupProgressPublisher {
       return;
     }
 
+    const tableChanged = state.currentTable !== progress.table;
     state.currentDatabase = progress.database;
     state.currentTable = progress.table;
     state.tablesDone = progress.tablesDone;
     state.tablesTotal = progress.tablesTotal;
+    state.tableInFlight = Boolean(progress.inFlight);
 
     if (progress.rowsDelta && progress.rowsDelta > 0) {
       state.rowsProcessed += progress.rowsDelta;
@@ -157,16 +162,13 @@ export class BackupProgressPublisher {
       state.bytesProcessed += progress.bytesDelta;
     }
 
-    const tableFrac =
-      progress.tablesTotal > 0 ? progress.tablesDone / progress.tablesTotal : 0;
-    state.percent = Math.min(
-      99,
-      Math.round(((state.dbIndex + tableFrac) / state.dbCount) * 100),
-    );
+    state.percent = this.computePercent(state);
 
     const now = Date.now();
+    // Always flush when the active table changes; otherwise throttle to 1 Hz.
+    const due = tableChanged || now - state.lastEmitAt >= 1000;
 
-    if (now - state.lastEmitAt < 1000) {
+    if (!due) {
       return;
     }
 
@@ -192,6 +194,29 @@ export class BackupProgressPublisher {
     });
   }
 
+  /**
+   * Overall run percent across databases. While a large table is streaming,
+   * treat it as partially done so the bar can move before the table finishes.
+   * Floor at 1% once any work has started so the wallboard does not stick at 0%.
+   * (ETA uses {@link overallFraction}, not this floored value.)
+   */
+  private computePercent(state: RunProgressState): number {
+    const raw = this.overallFraction(state) * 100;
+    let percent = Math.min(99, Math.round(raw));
+
+    if (
+      percent < 1 &&
+      (state.bytesProcessed > 0 ||
+        state.tablesDone > 0 ||
+        state.tableInFlight ||
+        Boolean(state.currentTable))
+    ) {
+      percent = 1;
+    }
+
+    return percent;
+  }
+
   private refreshRates(state: RunProgressState, nowMs: number): void {
     const dtSec = Math.max((nowMs - state.sampleAtMs) / 1000, 0.001);
     const rowDelta = state.rowsProcessed - state.sampleRows;
@@ -201,21 +226,47 @@ export class BackupProgressPublisher {
     state.bytesPerSec = Math.max(0, Math.round(byteDelta / dtSec));
 
     const elapsedSec = Math.max((nowMs - state.startedAtMs) / 1000, 0.001);
-
-    if (state.percent > 0 && state.percent < 100) {
-      state.etaSeconds = Math.max(
-        0,
-        Math.round((elapsedSec * (100 - state.percent)) / state.percent),
-      );
-    } else if (state.percent >= 100) {
-      state.etaSeconds = 0;
-    } else {
-      state.etaSeconds = null;
-    }
+    state.etaSeconds = this.computeEtaSeconds(state, elapsedSec);
 
     state.sampleAtMs = nowMs;
     state.sampleRows = state.rowsProcessed;
     state.sampleBytes = state.bytesProcessed;
+  }
+
+  /**
+   * ETA must NOT use the wallboard percent (floored at 1%): that yields
+   * ~99× elapsed while HIS is still on early tables of a multi-DB full run.
+   * Use the unrounded overall fraction; return null until it is meaningful.
+   */
+  private computeEtaSeconds(
+    state: RunProgressState,
+    elapsedSec: number,
+  ): number | null {
+    if (state.percent >= 100) {
+      return 0;
+    }
+
+    const overallFrac = this.overallFraction(state);
+
+    // Below ~2% overall the extrapolation is noise (especially one huge table).
+    if (overallFrac < 0.02) {
+      return null;
+    }
+
+    return Math.max(
+      0,
+      Math.round((elapsedSec * (1 - overallFrac)) / overallFrac),
+    );
+  }
+
+  private overallFraction(state: RunProgressState): number {
+    const inFlightFrac = state.tableInFlight ? 0.35 : 0;
+    const tableFrac =
+      state.tablesTotal > 0
+        ? Math.min(1, (state.tablesDone + inFlightFrac) / state.tablesTotal)
+        : 0;
+
+    return (state.dbIndex + tableFrac) / state.dbCount;
   }
 
   private async safePublish(message: BackupProgressMessage): Promise<void> {

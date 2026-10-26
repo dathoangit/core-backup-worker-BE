@@ -62,6 +62,8 @@ export class BackupScheduler implements OnModuleInit, OnModuleDestroy {
       this.assertCron(settings.hisFullCron, 'BACKUP_HIS_FULL_CRON');
       this.assertCron(settings.emrFullCron, 'BACKUP_EMR_FULL_CRON');
       this.assertCron(settings.lisFullCron, 'BACKUP_LIS_FULL_CRON');
+      this.assertCron(settings.hisLogicalCron, 'BACKUP_HIS_LOGICAL_CRON');
+      this.assertCron(settings.emrLogicalCron, 'BACKUP_EMR_LOGICAL_CRON');
       this.assertTimezone(settings.timezone);
 
       const databases =
@@ -109,6 +111,20 @@ export class BackupScheduler implements OnModuleInit, OnModuleDestroy {
         settings.lisFullCron,
         settings.timezone,
         ['LIS'],
+      );
+      this.registerLogicalJob(
+        'his-weekly-logical',
+        'HIS weekly logical',
+        settings.hisLogicalCron,
+        settings.timezone,
+        ['HIS'],
+      );
+      this.registerLogicalJob(
+        'emr-weekly-logical',
+        'EMR weekly logical',
+        settings.emrLogicalCron,
+        settings.timezone,
+        ['EMR'],
       );
       this.logger.log(
         `Backup cron jobs registered (count=${this.jobNames.length}, timezone=${settings.timezone}). ` +
@@ -201,6 +217,28 @@ export class BackupScheduler implements OnModuleInit, OnModuleDestroy {
         void this.runJob(label, {
           trigger: 'cron',
           mode: 'full',
+          sourceGroups,
+        });
+      },
+      `${label} cron=${cron}`,
+    );
+  }
+
+  private registerLogicalJob(
+    name: string,
+    label: string,
+    cron: string,
+    timezone: string,
+    sourceGroups: SourceGroup[],
+  ): void {
+    this.startCronJob(
+      name,
+      cron,
+      timezone,
+      () => {
+        void this.runJob(label, {
+          trigger: 'cron',
+          mode: 'logical',
           sourceGroups,
         });
       },

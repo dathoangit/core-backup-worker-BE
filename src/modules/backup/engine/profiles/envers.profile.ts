@@ -20,6 +20,7 @@ import {
   parseWatermark,
   splitIdRange,
 } from '../checkpoint';
+import { compressedCsvExt } from '../compressed-writer';
 import {
   copyFullTable,
   copyQueryToGzipFile,
@@ -110,16 +111,34 @@ async function snapshotAllTables(options: {
       continue;
     }
 
-    const outputPath = path.join(
-      outDir,
-      `${table.schema}.${table.table}.csv.gz`,
-    );
+    const qualified = `${table.schema}.${table.table}`;
+    const outputPath = path.join(outDir, `${qualified}${compressedCsvExt()}`);
+    progress?.onTableProgress({
+      database,
+      table: qualified,
+      tablesDone,
+      tablesTotal: tables.length,
+      inFlight: true,
+    });
+
+    let reportedBytes = 0;
     const result = await copyFullTable({
       client,
       schema: table.schema,
       table: table.table,
       outputPath,
       rowLimit,
+      onBytes: (delta) => {
+        reportedBytes += delta;
+        progress?.onTableProgress({
+          database,
+          table: qualified,
+          tablesDone,
+          tablesTotal: tables.length,
+          bytesDelta: delta,
+          inFlight: true,
+        });
+      },
     });
     chunks.push({
       key,
@@ -136,11 +155,12 @@ async function snapshotAllTables(options: {
     tablesDone += 1;
     progress?.onTableProgress({
       database,
-      table: `${table.schema}.${table.table}`,
+      table: qualified,
       tablesDone,
       tablesTotal: tables.length,
       rowsDelta: Math.max(result.rowCount, 0),
-      bytesDelta: Math.max(result.bytes, 0),
+      bytesDelta: Math.max(result.bytes - reportedBytes, 0),
+      inFlight: false,
     });
   }
 
@@ -197,7 +217,9 @@ async function copyRevChunks(options: {
 
     const outputPath = path.join(
       outDir,
-      `${schema}.${table}.${range.fromExclusive}_${range.toInclusive}.csv.gz`,
+      `${schema}.${table}.${range.fromExclusive}_${
+        range.toInclusive
+      }${compressedCsvExt()}`,
     );
     const chunk = await copyTableChunk({
       client,
@@ -266,7 +288,9 @@ async function exportEnversPatches(options: {
 
     const file = path.join(
       outDir,
-      `patch_${table.schema}.${table.table}_${fromExclusive}_${toInclusive}.csv.gz`,
+      `patch_${table.schema}.${
+        table.table
+      }_${fromExclusive}_${toInclusive}${compressedCsvExt()}`,
     );
 
     const result = await copyQueryToGzipFile(
@@ -301,7 +325,9 @@ async function exportEnversPatches(options: {
 
     const deletesFile = path.join(
       outDir,
-      `deletes_${table.schema}.${table.table}_${fromExclusive}_${toInclusive}.csv.gz`,
+      `deletes_${table.schema}.${
+        table.table
+      }_${fromExclusive}_${toInclusive}${compressedCsvExt()}`,
     );
     const deletes = await copyQueryToGzipFile(
       client,

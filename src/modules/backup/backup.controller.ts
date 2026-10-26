@@ -38,7 +38,12 @@ export class BackupController {
     @Query('groups') groupsRaw?: string,
     @Query('databases') databasesRaw?: string,
   ) {
-    const mode: BackupMode = modeRaw === 'full' ? 'full' : 'incremental';
+    const mode: BackupMode =
+      modeRaw === 'full'
+        ? 'full'
+        : modeRaw === 'logical'
+          ? 'logical'
+          : 'incremental';
     const sourceGroups = this.parseGroups(groupsRaw);
     const databases = this.parseDatabases(databasesRaw);
 

@@ -29,6 +29,8 @@ export interface BackupTableProgress {
   tablesTotal: number;
   rowsDelta?: number;
   bytesDelta?: number;
+  /** True while a table COPY/stream is in flight (before it finishes). */
+  inFlight?: boolean;
 }
 
 export interface BackupProgressSink {

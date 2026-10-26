@@ -92,7 +92,7 @@ export class BackupQueueService {
   ) {}
 
   queueForMode(mode: BackupMode): Queue<BackupQueueJobData> {
-    return mode === 'full' ? this.fullQueue : this.incrementalQueue;
+    return mode === 'incremental' ? this.incrementalQueue : this.fullQueue;
   }
 
   async enqueue(options: BackupRunOptions): Promise<EnqueueBackupResult> {
@@ -138,7 +138,9 @@ export class BackupQueueService {
 
     const queue = this.queueForMode(mode);
     const priority =
-      mode === 'full' ? BACKUP_FULL_PRIORITY : BACKUP_INCREMENTAL_PRIORITY;
+      mode === 'incremental'
+        ? BACKUP_INCREMENTAL_PRIORITY
+        : BACKUP_FULL_PRIORITY;
 
     try {
       await queue.add(BACKUP_QUEUE_JOB_NAME, jobData, {
@@ -425,7 +427,7 @@ export class BackupQueueService {
 
   async recoverStaleState(): Promise<void> {
     const running = await this.runRepo.find({
-      where: { status: In(['running']) },
+      where: { status: In(['running', 'cancelling']) },
     });
 
     for (const row of running) {
@@ -434,17 +436,29 @@ export class BackupQueueService {
       if (found) {
         const state = await found.job.getState();
 
-        if (state === 'active' || state === 'waiting' || state === 'delayed') {
+        // Waiting/delayed jobs can still be consumed after boot — keep them.
+        if (
+          state === 'waiting' ||
+          state === 'delayed' ||
+          state === 'prioritized'
+        ) {
           continue;
+        }
+
+        // Active jobs at worker boot are orphans from the previous process
+        // (lockDuration can keep them "active" for hours after a crash).
+        if (state === 'active') {
+          await this.discardOrphanActiveJob(found.job, row.runId);
         }
       }
 
       row.status = 'error';
       row.finishedAt = new Date();
       row.error =
-        row.error ?? 'Stale after process restart (backup was interrupted)';
+        row.error ?? 'Interrupted by worker restart (backup was interrupted)';
       await this.runRepo.save(row);
       this.logger.warn(`Marked stale running run ${row.runId} as error`);
+      await this.backupRedis.clearCancelFlag(row.runId);
     }
 
     try {
@@ -520,10 +534,15 @@ export class BackupQueueService {
         ? row.databasesFilter.split(',').filter(Boolean)
         : undefined;
 
-      const mode = row.mode === 'full' ? 'full' : 'incremental';
+      const mode =
+        row.mode === 'full' || row.mode === 'logical'
+          ? row.mode
+          : 'incremental';
       const queue = this.queueForMode(mode);
       const priority =
-        mode === 'full' ? BACKUP_FULL_PRIORITY : BACKUP_INCREMENTAL_PRIORITY;
+        mode === 'incremental'
+          ? BACKUP_INCREMENTAL_PRIORITY
+          : BACKUP_FULL_PRIORITY;
 
       await queue.add(
         BACKUP_QUEUE_JOB_NAME,
@@ -549,6 +568,43 @@ export class BackupQueueService {
   private async signalCancel(runId: string): Promise<void> {
     await this.backupRedis.publishCancel(runId);
     await this.cancelRegistry.requestCancel(runId);
+  }
+
+  /**
+   * Fail/remove a BullMQ job left in `active` after process death.
+   * Recovery only runs on worker boot, so any `active` job here is orphaned.
+   */
+  private async discardOrphanActiveJob(
+    job: Job<BackupQueueJobData>,
+    runId: string,
+  ): Promise<void> {
+    const reason = 'Interrupted by worker restart';
+
+    try {
+      const token =
+        typeof job.token === 'string' && job.token.length > 0 ? job.token : '0';
+      await job.moveToFailed(new Error(reason), token, false);
+      this.logger.warn(`Moved orphan active job ${runId} to failed`);
+
+      return;
+    } catch (error) {
+      this.logger.warn(
+        `moveToFailed orphan ${runId} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    try {
+      await job.remove();
+      this.logger.warn(`Removed orphan active job ${runId}`);
+    } catch (error) {
+      this.logger.warn(
+        `remove orphan ${runId} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   private async findJob(
