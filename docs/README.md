@@ -14,4 +14,6 @@ Canonical entry: [`../README.md`](../README.md) (agent table).
 | [platform.md](./platform.md) | Bootstrap, health, filters, migrations |
 | [his-database.md](./his-database.md) | HIS source database survey (sizes, change feeds, access) |
 | [his-database-giai-thich.md](./his-database-giai-thich.md) | Bản giải thích tiếng Việt, dành cho người không chuyên |
+| [pham-vi-truy-cap-va-dung-luong.md](./pham-vi-truy-cap-va-dung-luong.md) | Bảng lấy được / không lấy được, loại DB, dung lượng + tăng trưởng/ngày |
+| [pham-vi-truy-cap-va-dung-luong.docx](./pham-vi-truy-cap-va-dung-luong.docx) | Bản Word cùng nội dung (gửi NCC / nội bộ) |
 | [backup-runbook.md](./backup-runbook.md) | NestJS backup module: CLI, cron, `/admin/backup/*`, restore plan |
