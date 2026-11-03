@@ -6,6 +6,45 @@ import {
   waitForProcess,
   writeStreamToCompressedFile,
 } from './compressed-writer';
+import { qualifyTable } from './copy-writer';
+
+export function buildSchemaDumpArgs(options: {
+  host: string;
+  port: number;
+  user: string;
+  database: string;
+  schemas?: string[];
+  excludeTables?: Array<{ schema: string; table: string }>;
+}): string[] {
+  const args = [
+    '-n',
+    '19',
+    'pg_dump',
+    '-h',
+    options.host,
+    '-p',
+    String(options.port),
+    '-U',
+    options.user,
+    '-d',
+    options.database,
+    '--schema-only',
+    '--no-owner',
+    '--no-privileges',
+  ];
+
+  if (options.schemas && options.schemas.length > 0) {
+    for (const schema of options.schemas) {
+      args.push('-n', schema);
+    }
+  }
+
+  for (const table of options.excludeTables ?? []) {
+    args.push('--exclude-table', qualifyTable(table.schema, table.table));
+  }
+
+  return args;
+}
 
 export async function dumpPostgresSchema(options: {
   host: string;
@@ -14,36 +53,32 @@ export async function dumpPostgresSchema(options: {
   password?: string;
   database: string;
   schemas?: string[];
+  excludeTables?: Array<{ schema: string; table: string }>;
   outputPath: string;
   signal?: AbortSignal;
 }): Promise<string> {
-  const { host, port, user, password, database, schemas, outputPath, signal } =
-    options;
+  const {
+    host,
+    port,
+    user,
+    password,
+    database,
+    schemas,
+    excludeTables,
+    outputPath,
+    signal,
+  } = options;
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
-  const args = [
-    '-n',
-    '19',
-    'pg_dump',
-    '-h',
+  const args = buildSchemaDumpArgs({
     host,
-    '-p',
-    String(port),
-    '-U',
+    port,
     user,
-    '-d',
     database,
-    '--schema-only',
-    '--no-owner',
-    '--no-privileges',
-  ];
-
-  if (schemas && schemas.length > 0) {
-    for (const schema of schemas) {
-      args.push('-n', schema);
-    }
-  }
+    schemas,
+    excludeTables,
+  });
 
   const dumpProc = spawnIsolated('nice', args, {
     PGPASSWORD: password ?? '',

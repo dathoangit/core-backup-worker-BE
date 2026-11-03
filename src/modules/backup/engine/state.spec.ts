@@ -98,13 +98,14 @@ describe('checkpoint commit', () => {
     let state = defaultState('adempiere');
     saveState(dir, 'produce', state);
 
-    const pending = beginOrResumePending(state, '100', 'run-1');
+    const pending = beginOrResumePending(state, '100', 'run-1', 'full');
     state = { ...state, pending };
     saveState(dir, 'produce', state);
 
     const loaded = loadState(dir, 'produce', 'adempiere');
     expect(loaded.watermark).toBeNull();
     expect(loaded.pending?.captured).toBe('100');
+    expect(loaded.pending?.mode).toBe('full');
 
     const withChunk = markChunkComplete(loaded.pending!, 'chunk-a');
     saveState(dir, 'produce', { ...loaded, pending: withChunk });
@@ -113,7 +114,7 @@ describe('checkpoint commit', () => {
     expect(mid.watermark).toBeNull();
     expect(mid.pending?.completedChunkKeys).toEqual(['chunk-a']);
 
-    const committed = commitWatermark(mid, mid.pending!.captured);
+    const committed = commitWatermark(mid, mid.pending!.captured, 'full');
     saveState(dir, 'produce', committed);
 
     const done = loadState(dir, 'produce', 'adempiere');
@@ -129,12 +130,74 @@ describe('checkpoint commit', () => {
         captured: '100',
         runId: 'run-1',
         completedChunkKeys: ['chunk-a'],
+        mode: 'full' as const,
       },
     };
 
-    const pending = beginOrResumePending(state, '200', 'run-2');
+    const pending = beginOrResumePending(state, '200', 'run-2', 'full');
     expect(pending.captured).toBe('100');
     expect(pending.runId).toBe('run-1');
     expect(pending.completedChunkKeys).toEqual(['chunk-a']);
+    expect(pending.mode).toBe('full');
+  });
+
+  it('does not adopt a full pending when starting incremental', () => {
+    const state = {
+      ...defaultState('adempiere'),
+      pending: {
+        captured: '100',
+        runId: 'run-full',
+        completedChunkKeys: ['full:adempiere.t'],
+        mode: 'full' as const,
+      },
+    };
+
+    const pending = beginOrResumePending(
+      state,
+      '200',
+      'run-incr',
+      'incremental',
+    );
+    expect(pending.captured).toBe('200');
+    expect(pending.runId).toBe('run-incr');
+    expect(pending.mode).toBe('incremental');
+    expect(pending.completedChunkKeys).toEqual([]);
+  });
+
+  it('preserves a foreign full pending when incremental commits watermark', () => {
+    const foreign = {
+      captured: '100',
+      runId: 'run-full',
+      completedChunkKeys: ['full:adempiere.t'],
+      mode: 'full' as const,
+    };
+    const state = {
+      ...defaultState('adempiere'),
+      pending: foreign,
+    };
+
+    const committed = commitWatermark(state, '200', 'incremental');
+    expect(committed.watermark).toBe('200');
+    expect(committed.pending).toEqual(foreign);
+    expect(committed.initialFullDone).toBe(true);
+  });
+
+  it('treats legacy pending without mode as full', () => {
+    const state = {
+      ...defaultState('adempiere'),
+      pending: {
+        captured: '100',
+        runId: 'run-legacy',
+        completedChunkKeys: ['chunk-a'],
+      },
+    };
+
+    const asFull = beginOrResumePending(state, '200', 'run-2', 'full');
+    expect(asFull.runId).toBe('run-legacy');
+    expect(asFull.captured).toBe('100');
+
+    const asIncr = beginOrResumePending(state, '200', 'run-3', 'incremental');
+    expect(asIncr.runId).toBe('run-3');
+    expect(asIncr.captured).toBe('200');
   });
 });

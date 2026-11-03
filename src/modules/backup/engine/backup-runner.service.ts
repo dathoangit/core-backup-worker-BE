@@ -33,6 +33,7 @@ import { backupAdempiereDatabase } from './profiles/adempiere.profile';
 import { backupEnversDatabase } from './profiles/envers.profile';
 import { backupMssqlSnapshot } from './profiles/mssql-snapshot.profile';
 import { backupPgLogicalDump } from './profiles/pg-logical-dump.profile';
+import { listTablesWithoutSelect } from './schema';
 import { dumpPostgresSchema } from './schema-dump';
 import { writeDatabaseSha256Sums } from './sha256sums';
 
@@ -350,6 +351,7 @@ export class BackupRunnerService {
           database,
           backupDir: volumeDir,
           runId,
+          mode,
           devRowLimit: config.devRowLimit,
           statementTimeoutMs: config.statementTimeoutMs,
           chunkSize: Number(config.chunkSize),
@@ -409,23 +411,43 @@ export class BackupRunnerService {
 
       if (source.group === 'EMR' || source.group === 'BADL') {
         if (mode === 'full') {
-          await dumpPostgresSchema({
-            host: source.host,
-            port: source.port,
-            user: source.user,
-            password: source.password,
+          const excludeTables = await listTablesWithoutSelect(client);
+          const schemaPath = path.join(
+            volumeDir,
+            'runs',
+            runId,
             database,
-            schemas: undefined,
-            outputPath: path.join(
-              volumeDir,
-              'runs',
-              runId,
+            'schema',
+            'schema.sql.zst',
+          );
+
+          try {
+            await dumpPostgresSchema({
+              host: source.host,
+              port: source.port,
+              user: source.user,
+              password: source.password,
               database,
-              'schema',
-              'schema.sql.zst',
-            ),
-            signal,
-          });
+              schemas: undefined,
+              excludeTables,
+              outputPath: schemaPath,
+              signal,
+            });
+          } catch (error) {
+            if (signal?.aborted) {
+              throw error;
+            }
+
+            const message =
+              error instanceof Error ? error.message : String(error);
+            this.logger.warn(
+              `run=${runId} schema dump skipped for ${database}: ${message}`,
+            );
+            sink?.onLog(
+              `schema dump skipped for ${database}: ${message}`,
+              'warn',
+            );
+          }
         }
 
         const emrResult = await backupEnversDatabase({

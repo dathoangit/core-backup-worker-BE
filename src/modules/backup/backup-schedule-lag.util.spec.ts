@@ -29,13 +29,29 @@ describe('backup-schedule-lag.util', () => {
     expect(state).toBe('on_time');
   });
 
-  it('marks one missed slot as overdue after grace', () => {
+  it('stays on schedule until two days even if a cron slot was missed', () => {
     jest.useFakeTimers({
       now: new Date('2026-10-24T09:35:00.000Z'),
     });
 
     const state = resolveBackupLagState({
-      lastOkAt: '2026-10-24T05:01:00.000Z',
+      lastOkAt: '2026-10-23T21:00:00.000Z',
+      lastDbStatus: 'ok',
+      cronExpr: CRON,
+      timezone: TZ,
+      graceMinutes: BACKUP_LAG_GRACE_MINUTES,
+    });
+
+    expect(state).toBe('on_time');
+  });
+
+  it('turns yellow after two days and before one week', () => {
+    jest.useFakeTimers({
+      now: new Date('2026-10-26T10:00:00.000Z'),
+    });
+
+    const state = resolveBackupLagState({
+      lastOkAt: '2026-10-24T05:00:00.000Z',
       lastDbStatus: 'ok',
       cronExpr: CRON,
       timezone: TZ,
@@ -45,13 +61,13 @@ describe('backup-schedule-lag.util', () => {
     expect(state).toBe('overdue');
   });
 
-  it('marks two missed slots as missed', () => {
+  it('marks lag older than one week as missed', () => {
     jest.useFakeTimers({
       now: new Date('2026-10-24T09:35:00.000Z'),
     });
 
     const state = resolveBackupLagState({
-      lastOkAt: '2026-10-23T21:00:00.000Z',
+      lastOkAt: '2026-10-16T09:00:00.000Z',
       lastDbStatus: 'ok',
       cronExpr: CRON,
       timezone: TZ,

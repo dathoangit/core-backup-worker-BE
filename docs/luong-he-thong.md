@@ -132,7 +132,8 @@ Worker publish (camelCase JSON): `percent`, `rowsProcessed`, `bytesProcessed`, `
 | Method | Path | Việc |
 |--------|------|------|
 | `POST` | `/runs?...` | Enqueue. `202`. |
-| `POST` | `/runs/:runId/cancel` | Hủy. |
+| `POST` | `/runs/:runId/cancel` | Hủy (giữ checkpoint). |
+| `POST` | `/runs/:runId/resume` | Chạy tiếp run `cancelled` / `error` / `partial` (enqueue run mới cùng mode/groups). |
 | `GET` | `/queue` | Snapshot BullMQ + DB queued/running. |
 | `POST` | `/queue/cancel-all-queued` | Hủy mọi run `status=queued`. |
 | `GET` | `/runs`, `/runs/:runId` | Lịch sử. |

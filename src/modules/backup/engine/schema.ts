@@ -55,6 +55,31 @@ export async function listReadableTables(
   return { tables, skipped };
 }
 
+/** Ordinary tables the connected role cannot SELECT. pg_dump must exclude them or LOCK fails the whole schema dump. */
+export async function listTablesWithoutSelect(
+  client: Client,
+): Promise<TableRef[]> {
+  const result = await client.query<{ schema: string; table: string }>(
+    `
+    SELECT n.nspname AS schema, c.relname AS table
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind = 'r'
+      AND n.nspname <> 'pg_catalog'
+      AND n.nspname <> 'information_schema'
+      AND n.nspname NOT LIKE 'pg_toast%'
+      AND n.nspname NOT LIKE 'pg_temp%'
+      AND NOT has_table_privilege(c.oid, 'SELECT')
+    ORDER BY n.nspname, c.relname
+    `,
+  );
+
+  return result.rows.map((row) => ({
+    schema: row.schema,
+    table: row.table,
+  }));
+}
+
 export async function findSchemas(
   client: Client,
   candidates: string[],

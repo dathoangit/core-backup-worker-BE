@@ -8,6 +8,7 @@ import { BackupCancelledError } from '../../errors/backup-cancelled.error';
 import { type BackupProgressSink } from '../../progress/backup-progress.types';
 import { type BackupCancelRegistry } from '../../queue/backup-cancel.registry';
 import {
+  type BackupMode,
   type ChunkResult,
   type DatabaseRunResult,
   type DatabaseState,
@@ -25,6 +26,7 @@ import {
   commitWatermark,
   loadState,
   markChunkComplete,
+  persistPendingForMode,
   saveState,
 } from '../state';
 
@@ -64,10 +66,9 @@ function persistPending(
   state: DatabaseState,
   pending: PendingState,
 ): DatabaseState {
-  const next = { ...state, pending };
-  saveState(backupDir, database, next);
+  const mode = pending.mode ?? 'incremental';
 
-  return next;
+  return persistPendingForMode(backupDir, database, state, pending, mode);
 }
 
 async function listUserTables(
@@ -263,6 +264,7 @@ export async function backupMssqlSnapshot(options: {
   database: string;
   backupDir: string;
   runId: string;
+  mode?: BackupMode;
   devRowLimit?: number;
   statementTimeoutMs?: number;
   chunkSize?: number;
@@ -275,6 +277,7 @@ export async function backupMssqlSnapshot(options: {
     database,
     backupDir,
     runId,
+    mode = 'incremental',
     devRowLimit = 0,
     statementTimeoutMs = 0,
     chunkSize = DEFAULT_LIS_CHUNK_ROWS,
@@ -294,7 +297,7 @@ export async function backupMssqlSnapshot(options: {
 
   let state = loadState(backupDir, database, 'snapshot');
   const watermarkBefore = state.watermark;
-  let pending = beginOrResumePending(state, captured, runId);
+  let pending = beginOrResumePending(state, captured, runId, mode);
   state = persistPending(backupDir, database, state, pending);
 
   const pool = new sql.ConnectionPool({
@@ -564,7 +567,7 @@ export async function backupMssqlSnapshot(options: {
       tablesDone += 1;
     }
 
-    state = commitWatermark(state, pending.captured);
+    state = commitWatermark(state, pending.captured, mode);
     saveState(backupDir, database, state);
 
     return {

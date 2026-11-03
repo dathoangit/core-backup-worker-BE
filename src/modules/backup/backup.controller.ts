@@ -62,6 +62,13 @@ export class BackupController {
     return this.backupService.cancelRun(runId);
   }
 
+  @Post('runs/:runId/resume')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @Auth()
+  resumeRun(@Param('runId') runId: string) {
+    return this.backupService.resumeRun(runId);
+  }
+
   @Get('queue')
   @Auth()
   getQueue() {

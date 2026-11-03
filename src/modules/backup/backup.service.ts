@@ -226,6 +226,58 @@ export class BackupService {
     return this.backupQueue.cancel(runId);
   }
 
+  /**
+   * Re-enqueue a finished cancelled/error/partial run with the same mode and
+   * filters. Checkpoint resume uses state/*.json pending from the interrupted DB.
+   */
+  async resumeRun(runId: string): Promise<TriggerRunResult> {
+    if (!this.backupQueue || !this.runRepo) {
+      throw new ConflictException(
+        'Backup queue is not available in this process',
+      );
+    }
+
+    const row = await this.runRepo.findOne({ where: { runId } });
+
+    if (!row) {
+      throw new NotFoundException(`Run ${runId} not found`);
+    }
+
+    const resumable: BackupRunStatus[] = ['cancelled', 'error', 'partial'];
+
+    if (!resumable.includes(row.status)) {
+      throw new ConflictException(
+        `Cannot resume run ${runId} in status ${row.status}`,
+      );
+    }
+
+    const allowedGroups = new Set<SourceGroup>([
+      'HIS',
+      'EMR',
+      'BADL',
+      'LIS',
+      'PACS',
+    ]);
+    const sourceGroups = row.sourceGroups
+      ?.split(',')
+      .map((part) => part.trim().toUpperCase())
+      .filter((part): part is SourceGroup =>
+        allowedGroups.has(part as SourceGroup),
+      );
+    const databases = row.databasesFilter
+      ?.split(',')
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    return this.backupQueue.enqueue({
+      trigger: 'manual',
+      mode: row.mode,
+      sourceGroups:
+        sourceGroups && sourceGroups.length > 0 ? sourceGroups : undefined,
+      databases: databases && databases.length > 0 ? databases : undefined,
+    });
+  }
+
   async getQueueSnapshot() {
     if (!this.backupQueue) {
       throw new ConflictException(

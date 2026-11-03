@@ -38,6 +38,8 @@ import {
   commitWatermark,
   loadState,
   markChunkComplete,
+  persistPendingForMode,
+  savePendingOnFailure,
   saveState,
 } from '../state';
 
@@ -65,10 +67,9 @@ async function persistPending(
   state: DatabaseState,
   pending: PendingState,
 ): Promise<DatabaseState> {
-  const next = { ...state, pending };
-  saveState(backupDir, database, next);
+  const mode = pending.mode ?? 'incremental';
 
-  return next;
+  return persistPendingForMode(backupDir, database, state, pending, mode);
 }
 
 async function copyAppendChunks(options: {
@@ -427,7 +428,7 @@ export async function backupAdempiereDatabase(options: {
   );
   const capturedFresh = formatWatermark(tip);
 
-  let pending = beginOrResumePending(state, capturedFresh, runId);
+  let pending = beginOrResumePending(state, capturedFresh, runId, mode);
   const captured = pending.captured;
   state = await persistPending(backupDir, database, state, pending);
 
@@ -525,7 +526,7 @@ export async function backupAdempiereDatabase(options: {
       }
     }
 
-    state = commitWatermark(state, captured);
+    state = commitWatermark(state, captured, mode);
     saveState(backupDir, database, state);
 
     return {
@@ -540,7 +541,7 @@ export async function backupAdempiereDatabase(options: {
       skippedTables,
     };
   } catch (error) {
-    saveState(backupDir, database, { ...state, pending });
+    savePendingOnFailure(backupDir, database, state, pending, mode);
 
     throw error;
   }

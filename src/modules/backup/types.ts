@@ -57,6 +57,12 @@ export interface PendingState {
   captured: string;
   runId: string;
   completedChunkKeys: string[];
+  /**
+   * Mode that owns this unfinished window. Incremental must not adopt or
+   * commit a pending left by an interrupted full (and vice versa).
+   * Legacy files without mode are treated as `full` when matching.
+   */
+  mode?: BackupMode;
 }
 
 export interface DatabaseState {

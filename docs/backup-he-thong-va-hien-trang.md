@@ -215,6 +215,7 @@ Overview vẫn `percent=8`, `currentTable=ws_webservicetypeaccess` (stale) — *
 |--------|------|
 | `POST` | `/api/v1/admin/backup/runs?mode=full&groups=HIS,EMR,LIS` |
 | `POST` | `/api/v1/admin/backup/runs/:runId/cancel` |
+| `POST` | `/api/v1/admin/backup/runs/:runId/resume` |
 | `GET` | `/api/v1/admin/backup/queue` |
 | `GET` | `/api/v1/admin/backup/sources` |
 | `GET` | `/api/v1/admin/backup/runs` |

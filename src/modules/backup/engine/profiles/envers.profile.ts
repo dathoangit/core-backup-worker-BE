@@ -38,6 +38,8 @@ import {
   commitWatermark,
   loadState,
   markChunkComplete,
+  persistPendingForMode,
+  savePendingOnFailure,
   saveState,
 } from '../state';
 
@@ -57,10 +59,9 @@ async function persistPending(
   state: DatabaseState,
   pending: PendingState,
 ): Promise<DatabaseState> {
-  const next = { ...state, pending };
-  saveState(backupDir, database, next);
+  const mode = pending.mode ?? 'incremental';
 
-  return next;
+  return persistPendingForMode(backupDir, database, state, pending, mode);
 }
 
 async function snapshotAllTables(options: {
@@ -417,7 +418,7 @@ export async function backupEnversDatabase(options: {
     let state = loadState(backupDir, database, 'snapshot');
     const watermarkBefore = state.watermark;
     const captured = formatWatermark(BigInt(Date.now()));
-    const pending = beginOrResumePending(state, captured, runId);
+    const pending = beginOrResumePending(state, captured, runId, mode);
     state = await persistPending(backupDir, database, state, pending);
 
     try {
@@ -435,7 +436,7 @@ export async function backupEnversDatabase(options: {
         progress,
       });
       allChunks.push(...snap.chunks);
-      state = commitWatermark(snap.state, captured);
+      state = commitWatermark(snap.state, captured, mode);
       saveState(backupDir, database, state);
 
       return {
@@ -450,7 +451,7 @@ export async function backupEnversDatabase(options: {
         skippedTables,
       };
     } catch (error) {
-      saveState(backupDir, database, { ...state, pending });
+      savePendingOnFailure(backupDir, database, state, pending, mode);
 
       throw error;
     }
@@ -459,7 +460,7 @@ export async function backupEnversDatabase(options: {
   let state = loadState(backupDir, database, 'envers');
   const watermarkBefore = state.watermark;
   const capturedFresh = formatWatermark(revCount);
-  let pending = beginOrResumePending(state, capturedFresh, runId);
+  let pending = beginOrResumePending(state, capturedFresh, runId, mode);
   const captured = pending.captured;
   state = await persistPending(backupDir, database, state, pending);
 
@@ -567,7 +568,7 @@ export async function backupEnversDatabase(options: {
       }
     }
 
-    state = commitWatermark(state, captured);
+    state = commitWatermark(state, captured, mode);
     saveState(backupDir, database, state);
 
     return {
@@ -582,7 +583,7 @@ export async function backupEnversDatabase(options: {
       skippedTables,
     };
   } catch (error) {
-    saveState(backupDir, database, { ...state, pending });
+    savePendingOnFailure(backupDir, database, state, pending, mode);
 
     throw error;
   }

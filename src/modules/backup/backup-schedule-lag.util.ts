@@ -11,6 +11,12 @@ export type BackupLagState =
 
 export const BACKUP_LAG_GRACE_MINUTES = 30;
 
+/** Soft “past due” window — keep amber until about a week, not after ~1 day. */
+export const BACKUP_LAG_OVERDUE_MAX_DAYS = 7;
+
+/** Recent enough to still treat as on schedule when cron is unknown. */
+export const BACKUP_LAG_ON_TIME_MAX_DAYS = 2;
+
 function cronDateToJs(value: unknown): Date | null {
   if (!value) {
     return null;
@@ -103,18 +109,20 @@ export function cronPreviousScheduledFire(
   return new Date(next.getTime() - intervalMs);
 }
 
-/** When cron is unknown, avoid false alarms for recent backups only. */
-function fallbackLagStateWithoutCron(lastOk: Date, now: Date): BackupLagState {
-  const lagMinutes = Math.max(
-    0,
-    Math.round((now.getTime() - lastOk.getTime()) / 60_000),
-  );
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-  if (lagMinutes <= 6 * 60) {
+/**
+ * Age-based freshness. A missed cron slot stays green until 2 days,
+ * yellow until 1 week, then red.
+ */
+function lagStateFromAge(lastOk: Date, now: Date): BackupLagState {
+  const ageMs = Math.max(0, now.getTime() - lastOk.getTime());
+
+  if (ageMs < BACKUP_LAG_ON_TIME_MAX_DAYS * DAY_MS) {
     return 'on_time';
   }
 
-  if (lagMinutes <= 24 * 60) {
+  if (ageMs < BACKUP_LAG_OVERDUE_MAX_DAYS * DAY_MS) {
     return 'overdue';
   }
 
@@ -144,35 +152,6 @@ export function resolveBackupLagState(options: {
   }
 
   const now = options.now ?? new Date();
-  const timezone = options.timezone ?? PUBLIC_OVERVIEW_TZ;
-  const cron = options.cronExpr?.trim();
 
-  if (!cron) {
-    return fallbackLagStateWithoutCron(lastOk, now);
-  }
-
-  const prevFire = cronPreviousScheduledFire(cron, timezone);
-  const intervalMs = cronIncrementalIntervalMs(cron, timezone);
-
-  if (!prevFire || !intervalMs) {
-    return fallbackLagStateWithoutCron(lastOk, now);
-  }
-
-  const graceMs = (options.graceMinutes ?? BACKUP_LAG_GRACE_MINUTES) * 60_000;
-
-  if (lastOk.getTime() >= prevFire.getTime()) {
-    return 'on_time';
-  }
-
-  if (now.getTime() < prevFire.getTime() + graceMs) {
-    return 'on_time';
-  }
-
-  const prevPrev = new Date(prevFire.getTime() - intervalMs);
-
-  if (lastOk.getTime() >= prevPrev.getTime()) {
-    return 'overdue';
-  }
-
-  return 'missed';
+  return lagStateFromAge(lastOk, now);
 }
