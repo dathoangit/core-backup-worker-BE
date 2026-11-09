@@ -103,15 +103,15 @@ export class BackupConfigService {
         (await this.read('BACKUP_EMR_INCREMENTAL_CRON')) ?? globalIncremental,
       lisIncrementalCron:
         (await this.read('BACKUP_LIS_INCREMENTAL_CRON')) ?? globalIncremental,
-      hisFullCron: (await this.read('BACKUP_HIS_FULL_CRON')) ?? '30 1 * * 0',
-      emrFullCron: (await this.read('BACKUP_EMR_FULL_CRON')) ?? '30 2 * * 0',
-      lisFullCron: (await this.read('BACKUP_LIS_FULL_CRON')) ?? '30 3 * * 0',
+      hisFullCron: (await this.read('BACKUP_HIS_FULL_CRON')) ?? '0 22 * * 5',
+      emrFullCron: (await this.read('BACKUP_EMR_FULL_CRON')) ?? '0 22 * * 6',
+      lisFullCron: (await this.read('BACKUP_LIS_FULL_CRON')) ?? '0 21 * * 0',
       timezone: (await this.read('BACKUP_TIMEZONE')) ?? 'Asia/Ho_Chi_Minh',
       historyEnabled: await this.truthy('BACKUP_HISTORY_ENABLED', true),
       retentionDays: await this.optionalInt('BACKUP_RETENTION_DAYS', 30),
       freshnessMaxAgeHours: await this.optionalInt(
         'BACKUP_FRESHNESS_MAX_AGE_HOURS',
-        5,
+        48,
       ),
       archiveTarget,
       devRowLimit: applyDevRowLimitPolicy(rawDevLimit, isDev),
@@ -122,9 +122,9 @@ export class BackupConfigService {
       minFreeBytes:
         (await this.optionalInt('BACKUP_MIN_FREE_GB', 50)) * 1024 ** 3,
       hisLogicalCron:
-        (await this.read('BACKUP_HIS_LOGICAL_CRON')) ?? '0 4 * * 0',
+        (await this.read('BACKUP_HIS_LOGICAL_CRON')) ?? '30 23 * * 6',
       emrLogicalCron:
-        (await this.read('BACKUP_EMR_LOGICAL_CRON')) ?? '0 5 * * 0',
+        (await this.read('BACKUP_EMR_LOGICAL_CRON')) ?? '0 1 * * 0',
       logicalJobs: await this.optionalInt('BACKUP_LOGICAL_JOBS', 4),
       logicalExcludeTableData: this.splitCsv(
         (await this.read('BACKUP_LOGICAL_EXCLUDE_TABLE_DATA')) ??
@@ -196,11 +196,11 @@ export class BackupConfigService {
         this.configService.get<string>('BACKUP_LIS_INCREMENTAL_CRON') ??
         globalIncremental,
       hisFullCron:
-        this.configService.get<string>('BACKUP_HIS_FULL_CRON') ?? '30 1 * * 0',
+        this.configService.get<string>('BACKUP_HIS_FULL_CRON') ?? '0 22 * * 5',
       emrFullCron:
-        this.configService.get<string>('BACKUP_EMR_FULL_CRON') ?? '30 2 * * 0',
+        this.configService.get<string>('BACKUP_EMR_FULL_CRON') ?? '0 22 * * 6',
       lisFullCron:
-        this.configService.get<string>('BACKUP_LIS_FULL_CRON') ?? '30 3 * * 0',
+        this.configService.get<string>('BACKUP_LIS_FULL_CRON') ?? '0 21 * * 0',
       timezone:
         this.configService.get<string>('BACKUP_TIMEZONE') ?? 'Asia/Ho_Chi_Minh',
       historyEnabled: !['0', 'false', 'no', 'off'].includes(
@@ -216,9 +216,9 @@ export class BackupConfigService {
       freshnessMaxAgeHours:
         Number.parseInt(
           this.configService.get<string>('BACKUP_FRESHNESS_MAX_AGE_HOURS') ??
-            '5',
+            '48',
           10,
-        ) || 5,
+        ) || 48,
       archiveTarget,
       devRowLimit: applyDevRowLimitPolicy(
         Number.isFinite(rawDevLimit as number) ? rawDevLimit : undefined,
@@ -248,10 +248,10 @@ export class BackupConfigService {
         1024 ** 3,
       hisLogicalCron:
         this.configService.get<string>('BACKUP_HIS_LOGICAL_CRON') ??
-        '0 4 * * 0',
+        '30 23 * * 6',
       emrLogicalCron:
         this.configService.get<string>('BACKUP_EMR_LOGICAL_CRON') ??
-        '0 5 * * 0',
+        '0 1 * * 0',
       logicalJobs:
         Number.parseInt(
           this.configService.get<string>('BACKUP_LOGICAL_JOBS') ?? '4',

@@ -40,7 +40,7 @@ export function resolveIncrementalCron(
   group: SourceGroup,
   sources: IncrementalCronSources,
 ): string {
-  const perDb = sources.perDatabase[database].trim();
+  const perDb = sources.perDatabase[database]?.trim();
 
   if (perDb) {
     return perDb;

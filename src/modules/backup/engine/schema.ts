@@ -55,28 +55,40 @@ export async function listReadableTables(
   return { tables, skipped };
 }
 
-/** Ordinary tables the connected role cannot SELECT. pg_dump must exclude them or LOCK fails the whole schema dump. */
-export async function listTablesWithoutSelect(
+/**
+ * Tables and sequences the connected role cannot read.
+ * pg_dump must --exclude-table these or one missing GRANT fails the whole dump.
+ * Sequences need SELECT to read last_value; table privilege does not cover them.
+ */
+export async function listRelationsWithoutDumpAccess(
   client: Client,
 ): Promise<TableRef[]> {
-  const result = await client.query<{ schema: string; table: string }>(
+  const result = await client.query<{ schema: string; name: string }>(
     `
-    SELECT n.nspname AS schema, c.relname AS table
+    SELECT n.nspname AS schema, c.relname AS name
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relkind = 'r'
-      AND n.nspname <> 'pg_catalog'
+    WHERE n.nspname <> 'pg_catalog'
       AND n.nspname <> 'information_schema'
       AND n.nspname NOT LIKE 'pg_toast%'
       AND n.nspname NOT LIKE 'pg_temp%'
-      AND NOT has_table_privilege(c.oid, 'SELECT')
+      AND (
+        (
+          c.relkind IN ('r', 'p', 'f', 'm')
+          AND NOT has_table_privilege(c.oid, 'SELECT')
+        )
+        OR (
+          c.relkind = 'S'
+          AND NOT has_sequence_privilege(c.oid, 'SELECT')
+        )
+      )
     ORDER BY n.nspname, c.relname
     `,
   );
 
   return result.rows.map((row) => ({
     schema: row.schema,
-    table: row.table,
+    table: row.name,
   }));
 }
 

@@ -3,10 +3,19 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
+import { Client } from 'pg';
+
 import { BackupCancelledError } from '../../errors/backup-cancelled.error';
 import { type BackupProgressSink } from '../../progress/backup-progress.types';
-import { type DatabaseRunResult, type SourceConfig } from '../../types';
+import {
+  type DatabaseRunResult,
+  type SkippedTable,
+  type SourceConfig,
+  type TableRef,
+} from '../../types';
 import { spawnIsolated, waitForProcess } from '../compressed-writer';
+import { qualifyTable } from '../copy-writer';
+import { listRelationsWithoutDumpAccess } from '../schema';
 
 function hashFileSync(filePath: string): string {
   const hash = createHash('sha256');
@@ -47,7 +56,87 @@ async function hashTree(dir: string, base: string): Promise<string[]> {
 }
 
 /**
+ * pg_dump arguments for a directory-format dump.
+ * Relations the role cannot SELECT are excluded so one missing GRANT does not
+ * abort the dump of everything else that was granted.
+ */
+export function buildLogicalDumpArgs(options: {
+  host: string;
+  port: number;
+  user: string;
+  database: string;
+  jobs: number;
+  outputDir: string;
+  preferredSchemas?: string[];
+  excludeTableData: string[];
+  excludeRelations: TableRef[];
+}): string[] {
+  const args = [
+    '-n',
+    '19',
+    'pg_dump',
+    '-h',
+    options.host,
+    '-p',
+    String(options.port),
+    '-U',
+    options.user,
+    '-d',
+    options.database,
+    '-Fd',
+    '-j',
+    String(Math.max(1, options.jobs)),
+    '--compress=zstd:3',
+    '--no-owner',
+    '--no-privileges',
+    '-f',
+    options.outputDir,
+  ];
+
+  if (options.preferredSchemas) {
+    for (const schema of options.preferredSchemas) {
+      args.push('-n', schema);
+    }
+  }
+
+  for (const table of options.excludeTableData) {
+    if (table.trim()) {
+      args.push('--exclude-table-data', table.trim());
+    }
+  }
+
+  for (const relation of options.excludeRelations) {
+    args.push('--exclude-table', qualifyTable(relation.schema, relation.table));
+  }
+
+  return args;
+}
+
+async function listExcludedRelations(
+  source: SourceConfig,
+  database: string,
+): Promise<TableRef[]> {
+  const client = new Client({
+    host: source.host,
+    port: source.port,
+    user: source.user,
+    password: source.password,
+    database,
+    connectionTimeoutMillis: 15_000,
+  });
+
+  await client.connect();
+
+  try {
+    return await listRelationsWithoutDumpAccess(client);
+  } finally {
+    await client.end();
+  }
+}
+
+/**
  * Weekly logical dump via pg_dump -Fd --compress=zstd for fast parallel restore.
+ * Only objects the backup role can already SELECT are included.
  */
 export async function backupPgLogicalDump(options: {
   source: SourceConfig;
@@ -81,41 +170,39 @@ export async function backupPgLogicalDump(options: {
 
   fs.mkdirSync(path.dirname(partialDir), { recursive: true });
 
+  const excludeRelations = await listExcludedRelations(source, database);
+  const skippedTables: SkippedTable[] = excludeRelations.map((relation) => ({
+    schema: relation.schema,
+    table: relation.table,
+    reason: 'no SELECT privilege',
+  }));
+
+  if (skippedTables.length > 0) {
+    const preview = skippedTables
+      .slice(0, 20)
+      .map((relation) => `${relation.schema}.${relation.table}`)
+      .join(', ');
+    const suffix =
+      skippedTables.length > 20 ? ` (+${skippedTables.length - 20} more)` : '';
+    progress?.onLog(
+      `logical dump skipping ${skippedTables.length} relation(s) without SELECT: ${preview}${suffix}`,
+      'warn',
+    );
+  }
+
   progress?.onLog(`logical dump starting ${database}`);
 
-  const args = [
-    '-n',
-    '19',
-    'pg_dump',
-    '-h',
-    source.host,
-    '-p',
-    String(source.port),
-    '-U',
-    source.user,
-    '-d',
+  const args = buildLogicalDumpArgs({
+    host: source.host,
+    port: source.port,
+    user: source.user,
     database,
-    '-Fd',
-    '-j',
-    String(Math.max(1, jobs)),
-    '--compress=zstd:3',
-    '--no-owner',
-    '--no-privileges',
-    '-f',
-    partialDir,
-  ];
-
-  if (preferredSchemas) {
-    for (const schema of preferredSchemas) {
-      args.push('-n', schema);
-    }
-  }
-
-  for (const table of excludeTableData) {
-    if (table.trim()) {
-      args.push('--exclude-table-data', table.trim());
-    }
-  }
+    jobs,
+    outputDir: partialDir,
+    preferredSchemas,
+    excludeTableData,
+    excludeRelations,
+  });
 
   const dumpProc = spawnIsolated('nice', args, {
     PGPASSWORD: source.password ?? '',
@@ -173,7 +260,7 @@ export async function backupPgLogicalDump(options: {
           toInclusive: '0',
         },
       ],
-      skippedTables: [],
+      skippedTables,
     };
   } catch (error) {
     if (fs.existsSync(partialDir)) {
@@ -197,7 +284,7 @@ export async function backupPgLogicalDump(options: {
       captured: null,
       watermarkAfter: null,
       chunks: [],
-      skippedTables: [],
+      skippedTables,
       error: error instanceof Error ? error.message : String(error),
     };
   } finally {

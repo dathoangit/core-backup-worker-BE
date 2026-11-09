@@ -33,7 +33,7 @@ import { backupAdempiereDatabase } from './profiles/adempiere.profile';
 import { backupEnversDatabase } from './profiles/envers.profile';
 import { backupMssqlSnapshot } from './profiles/mssql-snapshot.profile';
 import { backupPgLogicalDump } from './profiles/pg-logical-dump.profile';
-import { listTablesWithoutSelect } from './schema';
+import { listRelationsWithoutDumpAccess } from './schema';
 import { dumpPostgresSchema } from './schema-dump';
 import { writeDatabaseSha256Sums } from './sha256sums';
 
@@ -374,6 +374,7 @@ export class BackupRunnerService {
 
       if (source.group === 'HIS' && database === 'produce') {
         if (mode === 'full') {
+          const excludeTables = await listRelationsWithoutDumpAccess(client);
           await dumpPostgresSchema({
             host: source.host,
             port: source.port,
@@ -381,6 +382,7 @@ export class BackupRunnerService {
             password: source.password,
             database,
             schemas: ['adempiere'],
+            excludeTables,
             outputPath: path.join(
               volumeDir,
               'runs',
@@ -411,7 +413,7 @@ export class BackupRunnerService {
 
       if (source.group === 'EMR' || source.group === 'BADL') {
         if (mode === 'full') {
-          const excludeTables = await listTablesWithoutSelect(client);
+          const excludeTables = await listRelationsWithoutDumpAccess(client);
           const schemaPath = path.join(
             volumeDir,
             'runs',
